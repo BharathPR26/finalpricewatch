@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <meta name="description" content="PriceWatch — Automatically tracks product prices and sends Gmail alerts when prices drop"/>
+  <title>PriceWatch — Smart Price Tracker</title>
+  <link rel="stylesheet" href="css/style.css"/>
+</head>
+<body>
+
+<!-- ═══════════════ AUTH SCREEN ═══════════════════════════════ -->
+<div id="auth-screen">
+  <div class="auth-container">
+    <div class="auth-logo">
+      <div class="auth-logo-icon">🔔</div>
+      <div class="auth-logo-text">PriceWatch</div>
+      <div class="auth-tagline">Automatically tracks prices. Alerts you instantly.</div>
+      <div class="auth-features">
+        <span class="auth-feature">🤖 Auto price check</span>
+        <span class="auth-feature">📧 Gmail alerts</span>
+        <span class="auth-feature">📈 Price history</span>
+      </div>
+    </div>
+    <div class="auth-card">
+      <div class="auth-tabs">
+        <button class="auth-tab active" onclick="switchAuthTab('login')">Log In</button>
+        <button class="auth-tab" onclick="switchAuthTab('register')">Register</button>
+      </div>
+
+      <div class="auth-form active" id="form-login">
+        <div class="form-group">
+          <label>Email</label>
+          <input type="email" id="login-email" placeholder="you@example.com"
+            onkeydown="if(event.key==='Enter')handleLogin()"/>
+        </div>
+        <div class="form-group">
+          <label>Password</label>
+          <input type="password" id="login-password" placeholder="••••••••"
+            onkeydown="if(event.key==='Enter')handleLogin()"/>
+        </div>
+        <button class="btn btn-primary" style="width:100%;justify-content:center;padding:12px;font-size:14px" onclick="handleLogin()">
+          Log In →
+        </button>
+        <div class="auth-switch">No account? <a onclick="switchAuthTab('register')">Register free</a></div>
+      </div>
+
+      <div class="auth-form" id="form-register">
+        <div class="form-group">
+          <label>Your Name</label>
+          <input type="text" id="reg-name" placeholder="Your full name"/>
+        </div>
+        <div class="form-group">
+          <label>Email</label>
+          <input type="email" id="reg-email" placeholder="you@example.com"/>
+        </div>
+        <div class="form-group">
+          <label>Password</label>
+          <input type="password" id="reg-password" placeholder="At least 6 characters"
+            onkeydown="if(event.key==='Enter')handleRegister()"/>
+        </div>
+        <button class="btn btn-primary" style="width:100%;justify-content:center;padding:12px;font-size:14px" onclick="handleRegister()">
+          Create Account →
+        </button>
+        <div class="auth-switch">Have an account? <a onclick="switchAuthTab('login')">Log in</a></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ MAIN APP ══════════════════════════════════ -->
+<div id="app" style="display:none">
+
+  <div class="sidebar-overlay" id="sidebar-overlay" onclick="closeSidebar()"></div>
+
+  <div class="app-layout">
+
+    <!-- ── SIDEBAR ──────────────────────────────────────────── -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-logo">
+        <div class="logo-mark">
+          <div class="logo-icon">🔔</div>
+          <span class="logo-text">PriceWatch</span>
+        </div>
+        <button class="sidebar-close-btn" onclick="closeSidebar()">✕</button>
+      </div>
+      <nav class="sidebar-nav">
+        <div class="nav-section-label">Menu</div>
+        <button class="nav-item active" id="snav-dashboard" onclick="navigate('dashboard')">
+          <span class="nav-icon">📊</span> Dashboard
+        </button>
+        <button class="nav-item" id="snav-products" onclick="navigate('products')">
+          <span class="nav-icon">🛍️</span> My Products
+        </button>
+        <button class="nav-item" id="snav-watchlist" onclick="navigate('watchlist')">
+          <span class="nav-icon">👁️</span> Watchlist
+        </button>
+        <button class="nav-item" id="snav-alerts" onclick="navigate('alerts')">
+          <span class="nav-icon">🔔</span> Alerts
+          <span class="nav-badge" id="alert-badge" style="display:none">0</span>
+        </button>
+        <div class="nav-section-label">Account</div>
+        <button class="nav-item" id="snav-profile" onclick="navigate('profile')">
+          <span class="nav-icon">⚙️</span> Settings
+        </button>
+      </nav>
+      <div class="sidebar-user">
+        <div class="user-card">
+          <div class="user-avatar" id="sidebar-avatar">U</div>
+          <div style="min-width:0;flex:1">
+            <div class="user-name"  id="sidebar-name">User</div>
+            <div class="user-email" id="sidebar-email">—</div>
+          </div>
+          <button class="logout-btn" onclick="handleLogout()" title="Log out">⎋</button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ── TOP NAVBAR ────────────────────────────────────────── -->
+    <header class="topnav">
+      <button class="topnav-hamburger" onclick="openSidebar()">☰</button>
+
+      <div class="topnav-left">
+        <button class="topnav-btn active" id="tnav-dashboard" onclick="navigate('dashboard')">
+          📊 <span class="topnav-label">Dashboard</span>
+        </button>
+        <button class="topnav-btn" id="tnav-products" onclick="navigate('products')">
+          🛍️ <span class="topnav-label">Products</span>
+        </button>
+        <button class="topnav-btn" id="tnav-watchlist" onclick="navigate('watchlist')">
+          👁️ <span class="topnav-label">Watchlist</span>
+        </button>
+        <button class="topnav-btn" id="tnav-alerts" onclick="navigate('alerts')">
+          🔔 <span class="topnav-label">Alerts</span>
+        </button>
+        <div class="topnav-divider"></div>
+        <button class="topnav-btn" id="tnav-profile" onclick="navigate('profile')">
+          ⚙️ <span class="topnav-label">Settings</span>
+        </button>
+      </div>
+
+      <div class="topnav-right">
+        <div class="auto-status" id="auto-status" title="Prices are checked automatically every 6 hours">
+          <div class="dot"></div>
+          <span class="status-label">Auto-tracking ON</span>
+        </div>
+        <button class="topnav-icon-btn" onclick="navigate('alerts')" title="View alerts">
+          🔔 <span class="topnav-dot" id="topnav-dot"></span>
+        </button>
+        <button class="topnav-add-btn" onclick="openAddProduct()">
+          + <span class="btn-label">Add Product</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- ── PAGES ─────────────────────────────────────────────── -->
+    <main class="main">
+
+      <!-- DASHBOARD -->
+      <div class="page active" id="page-dashboard">
+        <div class="page-header">
+          <div>
+            <div class="page-title">Dashboard</div>
+            <div class="page-sub">Your price tracking overview</div>
+          </div>
+        </div>
+
+        <!-- Auto-tracking banner -->
+        <div class="auto-banner">
+          <div class="auto-banner-icon">🤖</div>
+          <div class="auto-banner-text">
+            <div class="auto-banner-title">Automatic Price Tracking is ON</div>
+            <div class="auto-banner-sub">PriceWatch checks all your watched products every 6 hours. When a price drops to your target, you get a Gmail alert automatically — no action needed from you.</div>
+          </div>
+          <div class="auto-banner-time" id="last-check-time">Next check in ~6h</div>
+        </div>
+
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-label">Products Tracked</div>
+            <div class="stat-value" id="stat-products">—</div>
+            <div class="stat-note">added to tracker</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Auto-Watching</div>
+            <div class="stat-value" id="stat-watching" style="color:var(--green)">—</div>
+            <div class="stat-note">with target prices</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Alerts Fired</div>
+            <div class="stat-value" id="stat-alerts">—</div>
+            <div class="stat-note">price drop matches</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Unread Alerts</div>
+            <div class="stat-value" id="stat-unread" style="color:var(--accent)">—</div>
+            <div class="stat-note">waiting for you</div>
+          </div>
+        </div>
+
+        <div id="best-deals-section" style="display:none;margin-bottom:24px">
+          <div class="section-title">🏆 Top Price Drops</div>
+          <div id="best-deals-list" class="alert-list"></div>
+        </div>
+
+        <div class="section-title">👁️ Watchlist Summary</div>
+        <div id="dashboard-watchlist"><div class="spinner"></div></div>
+      </div>
+
+      <!-- PRODUCTS -->
+      <div class="page" id="page-products">
+        <div class="page-header">
+          <div>
+            <div class="page-title">My Products</div>
+            <div class="page-sub">All tracked items — prices checked automatically every 6 hours</div>
+          </div>
+          <button class="btn btn-primary" onclick="openAddProduct()">+ Add Product</button>
+        </div>
+        <div class="search-bar">
+          <span class="search-icon">🔍</span>
+          <input type="text" placeholder="Search by name or category…"
+            oninput="filterProducts(this.value)" id="product-search"/>
+        </div>
+        <div id="products-grid" class="products-grid"><div class="spinner"></div></div>
+      </div>
+
+      <!-- PRODUCT DETAIL -->
+      <div class="page" id="page-detail">
+        <div class="detail-back" onclick="navigate('products')">← Back to Products</div>
+        <div id="detail-content"></div>
+      </div>
+
+      <!-- WATCHLIST -->
+      <div class="page" id="page-watchlist">
+        <div class="page-header">
+          <div>
+            <div class="page-title">Watchlist</div>
+            <div class="page-sub">Products with target prices — alerts fire automatically</div>
+          </div>
+        </div>
+        <div id="watchlist-content"><div class="spinner"></div></div>
+      </div>
+
+      <!-- ALERTS -->
+      <div class="page" id="page-alerts">
+        <div class="page-header">
+          <div>
+            <div class="page-title">Alerts</div>
+            <div class="page-sub">Price drops that matched your targets</div>
+          </div>
+          <button class="btn btn-outline" onclick="markAllRead()">✓ Mark All Read</button>
+        </div>
+        <div id="alerts-list" class="alert-list"><div class="spinner"></div></div>
+      </div>
+
+      <!-- SETTINGS / PROFILE -->
+      <div class="page" id="page-profile">
+        <div class="page-header">
+          <div>
+            <div class="page-title">Settings</div>
+            <div class="page-sub">Manage your account and notification preferences</div>
+          </div>
+        </div>
+
+        <div class="profile-card">
+          <div class="profile-title">My Account</div>
+          <div style="display:flex;align-items:center;gap:14px">
+            <div id="profile-avatar" style="width:52px;height:52px;border-radius:50%;background:linear-gradient(135deg,var(--accent),#e67e22);display:flex;align-items:center;justify-content:center;font-family:var(--font-h);font-size:22px;font-weight:800;flex-shrink:0;color:#fff;">U</div>
+            <div>
+              <div id="profile-name" style="font-size:16px;font-weight:600;"></div>
+              <div id="profile-email" style="font-size:13px;color:var(--muted);"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="profile-card">
+          <div class="profile-title">📧 Email Notifications</div>
+          <div class="toggle-row">
+            <div>
+              <div class="toggle-label">Send Gmail alerts on price drops</div>
+              <div style="font-size:12px;color:var(--muted);margin-top:2px">When a product hits your target, you receive a beautiful email with a buy button</div>
+            </div>
+            <div class="toggle-switch" id="email-toggle" onclick="toggleEmailNotif()">
+              <div class="toggle-knob"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="profile-card">
+          <div class="profile-title">🤖 How Automatic Tracking Works</div>
+          <div style="display:flex;flex-direction:column;gap:10px;margin-top:4px">
+            <div style="display:flex;gap:12px;align-items:flex-start">
+              <span style="font-size:18px;flex-shrink:0">1️⃣</span>
+              <div>
+                <div style="font-size:14px;font-weight:600;color:var(--text)">Add a product with a target price</div>
+                <div style="font-size:12px;color:var(--muted);margin-top:2px">Paste the URL and set the price you want to pay</div>
+              </div>
+            </div>
+            <div style="display:flex;gap:12px;align-items:flex-start">
+              <span style="font-size:18px;flex-shrink:0">2️⃣</span>
+              <div>
+                <div style="font-size:14px;font-weight:600;color:var(--text)">Server checks every 6 hours automatically</div>
+                <div style="font-size:12px;color:var(--muted);margin-top:2px">PriceWatch visits the URL and fetches the latest price — while you sleep</div>
+              </div>
+            </div>
+            <div style="display:flex;gap:12px;align-items:flex-start">
+              <span style="font-size:18px;flex-shrink:0">3️⃣</span>
+              <div>
+                <div style="font-size:14px;font-weight:600;color:var(--text)">SQL trigger fires instantly on price drop</div>
+                <div style="font-size:12px;color:var(--muted);margin-top:2px">The database detects the drop automatically — no code runs, the trigger handles it</div>
+              </div>
+            </div>
+            <div style="display:flex;gap:12px;align-items:flex-start">
+              <span style="font-size:18px;flex-shrink:0">4️⃣</span>
+              <div>
+                <div style="font-size:14px;font-weight:600;color:var(--text)">You get a Gmail email within minutes</div>
+                <div style="font-size:12px;color:var(--muted);margin-top:2px">With the product name, new price, price drop %, and a direct buy button</div>
+              </div>
+            </div>
+          </div>
+          <div style="margin-top:14px;padding:12px;background:rgba(255,77,106,.07);border:1px solid rgba(255,77,106,.2);border-radius:8px;font-size:12px;color:var(--muted);line-height:1.6">
+            ⚠️ <strong style="color:var(--text)">Note:</strong> Auto price fetch may not work on Amazon/Flipkart (they block bots). For those products, you can manually click "Update Price" to enter the latest price yourself. The alert and email still fire automatically after that.
+          </div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+</div>
+
+<!-- ═══════════════ MODAL: Add Product ════════════════════════ -->
+<div class="modal-overlay" id="modal-add-product">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">Track a New Product</div>
+      <button class="modal-close" onclick="closeModal('modal-add-product')">✕</button>
+    </div>
+    <div class="form-group">
+      <label>Product URL</label>
+      <div style="display:flex;gap:8px">
+        <input type="url" id="add-url" placeholder="Paste Amazon / Flipkart URL…" style="flex:1"
+          oninput="onUrlInput(this.value)"/>
+        <button class="btn btn-primary" id="fetch-btn" onclick="fetchFromUrl()" style="flex-shrink:0">🔍 Fetch</button>
+      </div>
+    </div>
+    <div id="scrape-status" style="display:none;margin-bottom:12px;padding:10px 13px;border-radius:8px;font-size:13px;line-height:1.5;"></div>
+    <div id="scrape-preview" style="display:none;margin-bottom:14px;padding:12px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;gap:12px;align-items:center;">
+      <img id="preview-img" src="" alt="" style="width:52px;height:52px;object-fit:cover;border-radius:6px;flex-shrink:0;" onerror="this.style.display='none'"/>
+      <div style="flex:1;min-width:0">
+        <div id="preview-name" style="font-size:13px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></div>
+        <div id="preview-price" style="font-size:18px;font-weight:500;color:var(--accent);font-family:var(--font-m);margin-top:2px;"></div>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Product Name *</label>
+      <input type="text" id="add-name" placeholder="e.g. Sony WH-1000XM5"/>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div class="form-group">
+        <label>Category</label>
+        <select id="add-category">
+          <option>Electronics</option><option>Fashion</option>
+          <option>Books</option><option>Food</option>
+          <option>Home</option><option>Other</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Current Price (₹) *</label>
+        <input type="number" id="add-price" placeholder="e.g. 29999" min="0"/>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Image URL (optional)</label>
+      <input type="url" id="add-image" placeholder="Auto-filled if detected…"/>
+    </div>
+    <div class="form-group">
+      <label>🎯 Alert me when price drops to (₹)</label>
+      <input type="number" id="add-target" placeholder="e.g. 24000 — you'll get a Gmail when it hits this" min="0"/>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:6px">
+      <button class="btn btn-outline" style="flex:1;justify-content:center" onclick="closeModal('modal-add-product')">Cancel</button>
+      <button class="btn btn-primary" style="flex:1;justify-content:center" onclick="submitAddProduct()">Start Tracking</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ MODAL: Update Price ═══════════════════════ -->
+<div class="modal-overlay" id="modal-update-price">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">Update Price Manually</div>
+      <button class="modal-close" onclick="closeModal('modal-update-price')">✕</button>
+    </div>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:16px;line-height:1.6">
+      Use this if the auto-fetch didn't work for this product (e.g. Amazon blocked the scraper). Enter the current price from the website — the alert and Gmail email fire automatically.
+    </p>
+    <div class="form-group">
+      <label>Current Price (₹) *</label>
+      <input type="number" id="update-price-val" placeholder="e.g. 24999" min="0"
+        onkeydown="if(event.key==='Enter')submitUpdatePrice()"/>
+    </div>
+    <input type="hidden" id="update-price-pid"/>
+    <div style="display:flex;gap:10px;margin-top:6px">
+      <button class="btn btn-outline" style="flex:1;justify-content:center" onclick="closeModal('modal-update-price')">Cancel</button>
+      <button class="btn btn-primary" style="flex:1;justify-content:center" onclick="submitUpdatePrice()">Save &amp; Check Alert</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toast-wrap"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="js/api.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
