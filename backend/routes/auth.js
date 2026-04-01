@@ -12,7 +12,8 @@ router.post('/register', async (req, res) => {
     if (password.length < 6)
       return res.status(400).json({ error: 'Password must be at least 6 characters.' });
 
-    const [existing] = await db.query('SELECT user_id FROM users WHERE email = ?', [email]);
+    const [existing] = await db.query(
+      'SELECT user_id FROM users WHERE email = ?', [email]);
     if (existing.length)
       return res.status(409).json({ error: 'Email already registered.' });
 
@@ -23,17 +24,17 @@ router.post('/register', async (req, res) => {
     );
     const user_id = result[0].user_id;
 
-    // Save session and wait for it to be written before responding
     req.session.user = { user_id, name, email };
     req.session.save((err) => {
       if (err) {
-        console.error('Session save error:', err);
-        return res.status(500).json({ error: 'Session error. Try logging in.' });
+        console.error('[Register] Session save error:', err);
+        return res.status(500).json({ error: 'Session error. Please try logging in.' });
       }
+      console.log('[Register] Success:', email);
       res.json({ message: 'Registered successfully.', user: req.session.user });
     });
   } catch (err) {
-    console.error('Register error:', err);
+    console.error('[Register] Error:', err.message);
     res.status(500).json({ error: 'Server error during registration.' });
   }
 });
@@ -45,7 +46,8 @@ router.post('/login', async (req, res) => {
     if (!email || !password)
       return res.status(400).json({ error: 'Email and password required.' });
 
-    const [rows] = await db.query('SELECT * FROM users WHERE email = ?', [email]);
+    const [rows] = await db.query(
+      'SELECT * FROM users WHERE email = ?', [email]);
     if (!rows.length)
       return res.status(401).json({ error: 'Invalid email or password.' });
 
@@ -54,17 +56,22 @@ router.post('/login', async (req, res) => {
     if (!match)
       return res.status(401).json({ error: 'Invalid email or password.' });
 
-    // Save session and wait before responding
-    req.session.user = { user_id: user.user_id, name: user.name, email: user.email };
+    req.session.user = {
+      user_id: user.user_id,
+      name:    user.name,
+      email:   user.email,
+    };
+
     req.session.save((err) => {
       if (err) {
-        console.error('Session save error:', err);
+        console.error('[Login] Session save error:', err);
         return res.status(500).json({ error: 'Session error. Please try again.' });
       }
+      console.log('[Login] Success:', email, '| Session ID:', req.session.id);
       res.json({ message: 'Login successful.', user: req.session.user });
     });
   } catch (err) {
-    console.error('Login error:', err);
+    console.error('[Login] Error:', err.message);
     res.status(500).json({ error: 'Server error during login.' });
   }
 });
@@ -72,17 +79,17 @@ router.post('/login', async (req, res) => {
 // POST /api/auth/logout
 router.post('/logout', (req, res) => {
   req.session.destroy((err) => {
-    if (err) console.error('Logout error:', err);
-    res.clearCookie('connect.sid');
+    if (err) console.error('[Logout] Error:', err);
+    res.clearCookie('pw_session');
     res.json({ message: 'Logged out.' });
   });
 });
 
 // GET /api/auth/me
 router.get('/me', (req, res) => {
-  console.log('[/me] session user:', req.session?.user?.email || 'none');
-  if (req.session?.user)
+  if (req.session?.user) {
     return res.json({ user: req.session.user });
+  }
   res.status(401).json({ error: 'Not authenticated.' });
 });
 
@@ -96,9 +103,9 @@ router.put('/notifications', async (req, res) => {
       'UPDATE users SET notify_email = ? WHERE user_id = ?',
       [notify_email, req.session.user.user_id]
     );
-    res.json({ message: 'Notification preference updated.' });
+    res.json({ message: 'Updated.' });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to update preference.' });
+    res.status(500).json({ error: 'Failed to update.' });
   }
 });
 

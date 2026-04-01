@@ -1,7 +1,9 @@
-const express  = require('express');
-const cors     = require('cors');
-const session  = require('express-session');
-const path     = require('path');
+const express        = require('express');
+const cors           = require('cors');
+const session        = require('express-session');
+const pgSession      = require('connect-pg-simple')(session);
+const { Pool }       = require('pg');
+const path           = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const db                      = require('./db');
@@ -13,58 +15,57 @@ const watchRoutes             = require('./routes/watchlist');
 const alertRoutes             = require('./routes/alerts');
 const scrapeRoutes            = require('./routes/scrape');
 
-const app  = express();
-const PORT = process.env.PORT || 3000;
+const app    = express();
+const PORT   = process.env.PORT || 3000;
 const isProd = process.env.NODE_ENV === 'production';
 
-// ── CRITICAL: Trust Render's proxy (fixes secure cookies) ──────
+// ── Trust Render proxy (CRITICAL for secure cookies) ──────────
 app.set('trust proxy', 1);
 
+// ── PostgreSQL pool for session store ─────────────────────────
+const pgPool = new Pool(
+  process.env.DATABASE_URL
+    ? { connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } }
+    : {
+        host:     process.env.DB_HOST     || 'localhost',
+        port:     parseInt(process.env.DB_PORT) || 5432,
+        user:     process.env.DB_USER     || 'postgres',
+        password: process.env.DB_PASSWORD || '',
+        database: process.env.DB_NAME     || 'pricewatch',
+      }
+);
+
 // ── CORS ───────────────────────────────────────────────────────
-// Allow requests from the same Render domain
-const FRONTEND_URL = process.env.FRONTEND_URL || '';
 app.use(cors({
-  origin: function(origin, callback) {
-    // Allow requests with no origin (mobile apps, curl, same-origin)
-    if (!origin) return callback(null, true);
-    // Allow any render.com domain and localhost
-    if (
-      origin.includes('onrender.com') ||
-      origin.includes('localhost') ||
-      origin.includes('127.0.0.1') ||
-      (FRONTEND_URL && origin === FRONTEND_URL)
-    ) {
-      return callback(null, true);
-    }
-    callback(null, true); // allow all for now — tighten later
-  },
-  credentials: true,
+  origin: true,       // allow all origins — sessions handled by cookie
+  credentials: true,  // allow cookies cross-origin
 }));
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ── SESSION ────────────────────────────────────────────────────
+// ── Session with PostgreSQL store ─────────────────────────────
+// Sessions are saved in the "session" table in Supabase
+// This means sessions survive server restarts on Render
 app.use(session({
+  store: new pgSession({
+    pool:            pgPool,
+    tableName:       'session',
+    createTableIfMissing: false, // we create it manually in Supabase
+    pruneSessionInterval: 60 * 60, // clean expired sessions every hour
+  }),
   secret:            process.env.SESSION_SECRET || 'pricewatch_secret_change_me',
-  resave:            true,
+  resave:            false,
   saveUninitialized: false,
   rolling:           true,
+  name:              'pw_session',
   cookie: {
     maxAge:   1000 * 60 * 60 * 24 * 7, // 7 days
-    secure:   isProd,   // HTTPS only on Render
+    secure:   isProd,
     httpOnly: true,
-    sameSite: isProd ? 'none' : 'lax', // 'none' needed for cross-origin on Render
+    sameSite: isProd ? 'none' : 'lax',
   },
 }));
-
-// ── Debug middleware (remove after confirming it works) ────────
-app.use((req, res, next) => {
-  if (req.path.startsWith('/api/')) {
-    console.log(`[${req.method}] ${req.path} | session user: ${req.session?.user?.email || 'none'}`);
-  }
-  next();
-});
 
 // ── Static frontend ────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, '../frontend')));
@@ -78,9 +79,9 @@ app.use('/api/scrape',    scrapeRoutes);
 
 // ── Health check ───────────────────────────────────────────────
 app.get('/api/health', (req, res) =>
-  res.json({ status: 'ok', time: new Date(), version: '2.0', env: process.env.NODE_ENV }));
+  res.json({ status: 'ok', time: new Date(), env: process.env.NODE_ENV }));
 
-// ── Cron endpoint — called by cron-job.org every 6 hours ───────
+// ── Cron endpoint — called by cron-job.org ─────────────────────
 app.get('/api/cron/check-prices', async (req, res) => {
   const key = req.query.key || req.headers['x-cron-key'];
   if (key !== (process.env.CRON_SECRET || 'pricewatch_cron')) {
@@ -168,50 +169,6 @@ async function runAutoScrape() {
   }
 }
 
-// ── Send pending emails ────────────────────────────────────────
-async function sendPendingEmails() {
-  try {
-    const [pending] = await db.query(`
-      SELECT a.alert_id, a.triggered_price, w.target_price,
-        p.name AS product_name, p.url, p.image_url, p.category,
-        u.email AS user_email, u.name AS user_name, u.notify_email,
-        (SELECT MIN(ph.price) FROM price_history ph WHERE ph.product_id = p.product_id) AS all_time_low,
-        (SELECT ph2.price FROM price_history ph2 WHERE ph2.product_id = p.product_id
-         ORDER BY ph2.recorded_at ASC LIMIT 1) AS first_price
-      FROM alerts a
-      JOIN watchlist w ON w.watch_id   = a.watch_id
-      JOIN products  p ON p.product_id = w.product_id
-      JOIN users     u ON u.user_id    = w.user_id
-      WHERE a.email_sent = FALSE AND u.notify_email = TRUE
-      LIMIT 20
-    `);
-
-    for (const alert of pending) {
-      const dropPct = alert.first_price > 0
-        ? ((alert.first_price - alert.triggered_price) / alert.first_price * 100).toFixed(1)
-        : '0';
-      const sent = await sendPriceAlertEmail({
-        toEmail:      alert.user_email,
-        userName:     alert.user_name,
-        productName:  alert.product_name,
-        productUrl:   alert.url,
-        productImage: alert.image_url,
-        currentPrice: alert.triggered_price,
-        targetPrice:  alert.target_price,
-        allTimeLow:   alert.all_time_low,
-        dropPct,
-        category:     alert.category,
-      });
-      if (sent) await db.query(
-        'UPDATE alerts SET email_sent = TRUE WHERE alert_id = ?',
-        [alert.alert_id]
-      );
-    }
-  } catch (err) {
-    console.error('[Email]', err.message);
-  }
-}
-
 // ── SPA Fallback ───────────────────────────────────────────────
 app.get('*', (req, res) =>
   res.sendFile(path.join(__dirname, '../frontend/index.html')));
@@ -219,10 +176,10 @@ app.get('*', (req, res) =>
 // ── Start ──────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`\n🔔 PriceWatch v2 → http://localhost:${PORT}`);
-  console.log(`   DB    : Supabase PostgreSQL`);
-  console.log(`   Email : ${process.env.GMAIL_USER || 'not configured'}`);
-  console.log(`   Cron  : External via cron-job.org`);
-  console.log(`   Env   : ${process.env.NODE_ENV || 'development'}\n`);
+  console.log(`   DB      : Supabase PostgreSQL`);
+  console.log(`   Session : PostgreSQL store (connect-pg-simple)`);
+  console.log(`   Email   : ${process.env.GMAIL_USER || 'not configured'}`);
+  console.log(`   Mode    : ${process.env.NODE_ENV || 'development'}\n`);
 });
 
-module.exports = { runAutoScrape, sendPendingEmails };
+module.exports = { runAutoScrape };
