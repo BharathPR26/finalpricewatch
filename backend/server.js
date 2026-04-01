@@ -15,22 +15,56 @@ const scrapeRoutes            = require('./routes/scrape');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
+const isProd = process.env.NODE_ENV === 'production';
 
-// ── CORS ──────────────────────────────────────────────────────
-app.use(cors({ origin: true, credentials: true }));
+// ── CRITICAL: Trust Render's proxy (fixes secure cookies) ──────
+app.set('trust proxy', 1);
+
+// ── CORS ───────────────────────────────────────────────────────
+// Allow requests from the same Render domain
+const FRONTEND_URL = process.env.FRONTEND_URL || '';
+app.use(cors({
+  origin: function(origin, callback) {
+    // Allow requests with no origin (mobile apps, curl, same-origin)
+    if (!origin) return callback(null, true);
+    // Allow any render.com domain and localhost
+    if (
+      origin.includes('onrender.com') ||
+      origin.includes('localhost') ||
+      origin.includes('127.0.0.1') ||
+      (FRONTEND_URL && origin === FRONTEND_URL)
+    ) {
+      return callback(null, true);
+    }
+    callback(null, true); // allow all for now — tighten later
+  },
+  credentials: true,
+}));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// ── SESSION ────────────────────────────────────────────────────
 app.use(session({
-  secret:            process.env.SESSION_SECRET || 'pricewatch_secret',
-  resave:            false,
+  secret:            process.env.SESSION_SECRET || 'pricewatch_secret_change_me',
+  resave:            true,
   saveUninitialized: false,
+  rolling:           true,
   cookie: {
-    maxAge:   1000 * 60 * 60 * 24 * 7,
-    secure:   process.env.NODE_ENV === 'production',
+    maxAge:   1000 * 60 * 60 * 24 * 7, // 7 days
+    secure:   isProd,   // HTTPS only on Render
     httpOnly: true,
-    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+    sameSite: isProd ? 'none' : 'lax', // 'none' needed for cross-origin on Render
   },
 }));
+
+// ── Debug middleware (remove after confirming it works) ────────
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api/')) {
+    console.log(`[${req.method}] ${req.path} | session user: ${req.session?.user?.email || 'none'}`);
+  }
+  next();
+});
 
 // ── Static frontend ────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, '../frontend')));
@@ -42,27 +76,21 @@ app.use('/api/watchlist', watchRoutes);
 app.use('/api/alerts',    alertRoutes);
 app.use('/api/scrape',    scrapeRoutes);
 
-// ── Health check — used by UptimeRobot / cron-job.org ─────────
+// ── Health check ───────────────────────────────────────────────
 app.get('/api/health', (req, res) =>
-  res.json({ status: 'ok', time: new Date(), version: '2.0' }));
+  res.json({ status: 'ok', time: new Date(), version: '2.0', env: process.env.NODE_ENV }));
 
-// ── Auto price check endpoint — called by cron-job.org ────────
-// External cron hits: GET /api/cron/check-prices
-// This keeps Render awake AND checks prices automatically
+// ── Cron endpoint — called by cron-job.org every 6 hours ───────
 app.get('/api/cron/check-prices', async (req, res) => {
-  // Simple security: check secret key
   const key = req.query.key || req.headers['x-cron-key'];
   if (key !== (process.env.CRON_SECRET || 'pricewatch_cron')) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
-
   res.json({ message: 'Price check started', time: new Date() });
-
-  // Run in background after responding
   runAutoScrape().catch(console.error);
 });
 
-// ── Auto price scraping function ───────────────────────────────
+// ── Auto price scraping ────────────────────────────────────────
 async function runAutoScrape() {
   console.log('\n[AutoScrape] Starting price check...');
   try {
@@ -100,17 +128,14 @@ async function runAutoScrape() {
           continue;
         }
 
-        // Save new price — alert check happens in products route
         await db.query(
           'INSERT INTO price_history (product_id, price) VALUES (?, ?)',
           [product.product_id, newPrice]
         );
 
-        // Check and create alerts manually (no trigger on Render)
         const { checkAndCreateAlerts } = require('./routes/products');
         const alertsCreated = await checkAndCreateAlerts(product.product_id, newPrice);
 
-        // Send emails
         for (const alert of alertsCreated) {
           if (!alert.notify_email) continue;
           const sent = await sendPriceAlertEmail({
@@ -134,7 +159,7 @@ async function runAutoScrape() {
         console.log(`[AutoScrape] ✓ ₹${newPrice}: ${product.name}`);
         await new Promise(r => setTimeout(r, 2000));
       } catch (err) {
-        console.log(`[AutoScrape] ✗ Error: ${product.name} — ${err.message}`);
+        console.log(`[AutoScrape] ✗ ${product.name}: ${err.message}`);
       }
     }
     console.log('[AutoScrape] Done.\n');
@@ -191,12 +216,13 @@ async function sendPendingEmails() {
 app.get('*', (req, res) =>
   res.sendFile(path.join(__dirname, '../frontend/index.html')));
 
-// ── Start server ───────────────────────────────────────────────
+// ── Start ──────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`\n🔔 PriceWatch v2 → http://localhost:${PORT}`);
   console.log(`   DB    : Supabase PostgreSQL`);
   console.log(`   Email : ${process.env.GMAIL_USER || 'not configured'}`);
-  console.log(`   Cron  : External via cron-job.org\n`);
+  console.log(`   Cron  : External via cron-job.org`);
+  console.log(`   Env   : ${process.env.NODE_ENV || 'development'}\n`);
 });
 
 module.exports = { runAutoScrape, sendPendingEmails };
