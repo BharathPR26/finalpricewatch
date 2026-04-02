@@ -2,10 +2,10 @@ const express        = require('express');
 const cors           = require('cors');
 const session        = require('express-session');
 const pgSession      = require('connect-pg-simple')(session);
-const { Pool }       = require('pg');
 const path           = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
+// Import db first — it creates the single shared pool
 const db                      = require('./db');
 const { sendPriceAlertEmail } = require('./mailer');
 const { scrapeProduct }       = require('./scraper');
@@ -19,40 +19,22 @@ const app    = express();
 const PORT   = process.env.PORT || 3000;
 const isProd = process.env.NODE_ENV === 'production';
 
-// ── Trust Render proxy (CRITICAL for secure cookies) ──────────
+// ── Trust Render's proxy (required for secure HTTPS cookies) ──
 app.set('trust proxy', 1);
 
-// ── PostgreSQL pool for session store ─────────────────────────
-const pgPool = new Pool(
-  process.env.DATABASE_URL
-    ? { connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } }
-    : {
-        host:     process.env.DB_HOST     || 'localhost',
-        port:     parseInt(process.env.DB_PORT) || 5432,
-        user:     process.env.DB_USER     || 'postgres',
-        password: process.env.DB_PASSWORD || '',
-        database: process.env.DB_NAME     || 'pricewatch',
-      }
-);
-
 // ── CORS ───────────────────────────────────────────────────────
-app.use(cors({
-  origin: true,       // allow all origins — sessions handled by cookie
-  credentials: true,  // allow cookies cross-origin
-}));
-
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ── Session with PostgreSQL store ─────────────────────────────
-// Sessions are saved in the "session" table in Supabase
-// This means sessions survive server restarts on Render
+// ── Session — reuse db.pool (no second connection pool!) ───────
 app.use(session({
   store: new pgSession({
-    pool:            pgPool,
-    tableName:       'session',
-    createTableIfMissing: false, // we create it manually in Supabase
-    pruneSessionInterval: 60 * 60, // clean expired sessions every hour
+    pool:                 db.pool,   // ← shared pool from db.js
+    tableName:            'session',
+    createTableIfMissing: false,
+    pruneSessionInterval: 60 * 60,
+    errorLog:             console.error,
   }),
   secret:            process.env.SESSION_SECRET || 'pricewatch_secret_change_me',
   resave:            false,
@@ -60,7 +42,7 @@ app.use(session({
   rolling:           true,
   name:              'pw_session',
   cookie: {
-    maxAge:   1000 * 60 * 60 * 24 * 7, // 7 days
+    maxAge:   1000 * 60 * 60 * 24 * 7,
     secure:   isProd,
     httpOnly: true,
     sameSite: isProd ? 'none' : 'lax',
@@ -81,13 +63,15 @@ app.use('/api/scrape',    scrapeRoutes);
 app.get('/api/health', (req, res) =>
   res.json({ status: 'ok', time: new Date(), env: process.env.NODE_ENV }));
 
-// ── Cron endpoint — called by cron-job.org ─────────────────────
+// ── Cron endpoint — called by cron-job.org every 6 hours ───────
 app.get('/api/cron/check-prices', async (req, res) => {
   const key = req.query.key || req.headers['x-cron-key'];
   if (key !== (process.env.CRON_SECRET || 'pricewatch_cron')) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
+  // Respond immediately — don't make cron-job.org wait
   res.json({ message: 'Price check started', time: new Date() });
+  // Run in background
   runAutoScrape().catch(console.error);
 });
 
@@ -158,7 +142,7 @@ async function runAutoScrape() {
         }
 
         console.log(`[AutoScrape] ✓ ₹${newPrice}: ${product.name}`);
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise(r => setTimeout(r, 3000));
       } catch (err) {
         console.log(`[AutoScrape] ✗ ${product.name}: ${err.message}`);
       }
@@ -169,6 +153,12 @@ async function runAutoScrape() {
   }
 }
 
+// ── Global error handler ───────────────────────────────────────
+app.use((err, req, res, next) => {
+  console.error('[Server Error]', err.message);
+  res.status(500).json({ error: 'Internal server error. Please try again.' });
+});
+
 // ── SPA Fallback ───────────────────────────────────────────────
 app.get('*', (req, res) =>
   res.sendFile(path.join(__dirname, '../frontend/index.html')));
@@ -176,8 +166,7 @@ app.get('*', (req, res) =>
 // ── Start ──────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`\n🔔 PriceWatch v2 → http://localhost:${PORT}`);
-  console.log(`   DB      : Supabase PostgreSQL`);
-  console.log(`   Session : PostgreSQL store (connect-pg-simple)`);
+  console.log(`   Session : Supabase PostgreSQL (shared pool)`);
   console.log(`   Email   : ${process.env.GMAIL_USER || 'not configured'}`);
   console.log(`   Mode    : ${process.env.NODE_ENV || 'development'}\n`);
 });
