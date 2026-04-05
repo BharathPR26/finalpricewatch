@@ -161,7 +161,23 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error. Please try again.' });
 });
 
-// ── SPA Fallback ───────────────────────────────────────────────
+// ── URL Route Handler ─────────────────────────────────────────
+// All these URLs serve index.html — JS router handles the rest
+// This makes https://pricewatch.onrender.com/login work properly
+const SPA_ROUTES = [
+  '/', '/login', '/register', '/dashboard',
+  '/products', '/watchlist', '/alerts', '/settings', '/predict',
+];
+SPA_ROUTES.forEach(r => {
+  app.get(r, (req, res) =>
+    res.sendFile(path.join(__dirname, '../frontend/index.html')));
+});
+
+// /products/:id → serve index.html, JS picks up the ID
+app.get('/products/:id', (req, res) =>
+  res.sendFile(path.join(__dirname, '../frontend/index.html')));
+
+// Catch-all SPA fallback
 app.get('*', (req, res) =>
   res.sendFile(path.join(__dirname, '../frontend/index.html')));
 
