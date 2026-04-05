@@ -41,4 +41,7 @@ const API = {
 
   // Scraper
   scrapeUrl: (url) => apiFetch('/scrape', { method: 'POST', body: JSON.stringify({ url }) }),
+
+  // AI Prediction
+  predict: (id) => apiFetch(`/predict/${id}`),
 };

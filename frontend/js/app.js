@@ -230,6 +230,8 @@ async function loadDetail(id) {
            </div>`}
     `;
     renderPriceChart(history, watchInfo?.target_price);
+    // Load AI prediction after chart
+    loadPrediction(id);
   } catch(e) { toast('Failed to load product.','error'); }
 }
 
@@ -259,6 +261,90 @@ function renderPriceChart(history, target) {
       },
     },
   });
+}
+
+// ── AI Prediction ─────────────────────────────────────────────
+async function loadPrediction(productId) {
+  const card = document.getElementById('ai-prediction-card');
+  const body = document.getElementById('ai-prediction-body');
+  if (!card || !body) return;
+
+  card.style.display = 'block';
+  body.innerHTML = `<div style="display:flex;align-items:center;gap:10px;padding:10px 0">
+    <div class="spinner" style="width:22px;height:22px;margin:0"></div>
+    <span style="font-size:13px;color:var(--muted)">AI is analysing price trends...</span>
+  </div>`;
+
+  try {
+    const data = await API.predict(productId);
+
+    if (data.error && !data.prediction?.length) {
+      body.innerHTML = `<div style="padding:10px 0;font-size:13px;color:var(--muted)">
+        ⚠️ ${data.error}
+      </div>`;
+      return;
+    }
+
+    const trendColor = data.trend === 'falling' ? 'var(--green)' : data.trend === 'rising' ? 'var(--red)' : 'var(--accent)';
+    const trendIcon  = data.trend === 'falling' ? '📉' : data.trend === 'rising' ? '📈' : '➡️';
+    const confColor  = data.confidence >= 70 ? 'var(--green)' : data.confidence >= 40 ? 'var(--accent)' : 'var(--red)';
+
+    body.innerHTML = `
+      <!-- Insight Banner -->
+      <div style="background:rgba(245,166,35,.07);border:1px solid rgba(245,166,35,.15);border-radius:10px;padding:14px 16px;margin-bottom:14px">
+        <div style="font-size:14px;font-weight:600;color:var(--text);line-height:1.5">${data.insight}</div>
+      </div>
+
+      <!-- Stats Row -->
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px">
+        <div style="background:var(--bg3);border:1px solid var(--border);border-radius:9px;padding:11px 12px;text-align:center">
+          <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:4px">Trend</div>
+          <div style="font-size:18px">${trendIcon}</div>
+          <div style="font-size:11px;font-weight:600;color:${trendColor};margin-top:2px">${data.trend?.toUpperCase()}</div>
+        </div>
+        <div style="background:var(--bg3);border:1px solid var(--border);border-radius:9px;padding:11px 12px;text-align:center">
+          <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:4px">Lowest in 7d</div>
+          <div style="font-size:15px;font-weight:600;color:var(--green);font-family:var(--font-m)">₹${fmt(data.min_predicted)}</div>
+          <div style="font-size:10px;color:var(--muted);margin-top:2px">${data.best_buy_day || ''}</div>
+        </div>
+        <div style="background:var(--bg3);border:1px solid var(--border);border-radius:9px;padding:11px 12px;text-align:center">
+          <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:4px">Confidence</div>
+          <div style="font-size:15px;font-weight:600;color:${confColor};font-family:var(--font-m)">${data.confidence}%</div>
+          <div style="font-size:10px;color:var(--muted);margin-top:2px">${data.data_points} data pts</div>
+        </div>
+      </div>
+
+      <!-- 7-day prediction table -->
+      <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:8px">7-Day Forecast</div>
+      <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px">
+        ${data.prediction.map((p, i) => {
+          const isMin   = p.price === data.min_predicted;
+          const dayName = new Date(p.date).toLocaleDateString('en-IN', { weekday: 'short' });
+          const dayNum  = new Date(p.date).getDate();
+          return `<div style="background:${isMin ? 'rgba(39,216,114,.1)' : 'var(--bg3)'};border:1px solid ${isMin ? 'rgba(39,216,114,.3)' : 'var(--border)'};border-radius:8px;padding:7px 4px;text-align:center">
+            <div style="font-size:9px;color:var(--muted)">${dayName}</div>
+            <div style="font-size:9px;color:var(--muted)">${dayNum}</div>
+            <div style="font-size:10px;font-weight:600;color:${isMin ? 'var(--green)' : 'var(--text)'};font-family:var(--font-m);margin-top:3px">₹${Math.round(p.price/100)*100 > 999 ? (p.price/1000).toFixed(1)+'k' : Math.round(p.price)}</div>
+            ${isMin ? '<div style="font-size:8px;color:var(--green);margin-top:2px">BEST</div>' : ''}
+          </div>`;
+        }).join('')}
+      </div>
+
+      ${data.drop_detected ? `<div style="margin-top:10px;padding:8px 12px;background:rgba(255,77,106,.08);border:1px solid rgba(255,77,106,.2);border-radius:8px;font-size:12px;color:var(--red)">🚨 Sudden price drop detected in the forecast window</div>` : ''}
+      <div style="margin-top:8px;font-size:10px;color:var(--muted)">
+        Model: ${data.method || 'Polynomial Regression'} · R² ${data.r2_score} · ${data.from_cache ? 'Cached result' : 'Fresh prediction'}
+      </div>
+    `;
+
+    // Update chart with prediction overlay
+    renderPriceChart(
+      null, null,
+      { history: data.history, prediction: data.prediction, target: null }
+    );
+
+  } catch(e) {
+    body.innerHTML = `<div style="padding:10px 0;font-size:13px;color:var(--muted)">Failed to load prediction. Try again later.</div>`;
+  }
 }
 
 // ── Watchlist ─────────────────────────────────────────────────

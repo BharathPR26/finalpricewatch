@@ -14,6 +14,7 @@ const productRoutes           = require('./routes/products');
 const watchRoutes             = require('./routes/watchlist');
 const alertRoutes             = require('./routes/alerts');
 const scrapeRoutes            = require('./routes/scrape');
+const predictRoutes           = require('./routes/predict');
 
 const app    = express();
 const PORT   = process.env.PORT || 3000;
@@ -58,6 +59,7 @@ app.use('/api/products',  productRoutes);
 app.use('/api/watchlist', watchRoutes);
 app.use('/api/alerts',    alertRoutes);
 app.use('/api/scrape',    scrapeRoutes);
+app.use('/api/predict',   predictRoutes);
 
 // ── Health check ───────────────────────────────────────────────
 app.get('/api/health', (req, res) =>
