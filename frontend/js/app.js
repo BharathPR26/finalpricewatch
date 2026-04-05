@@ -803,3 +803,192 @@ function toast(msg, type = 'info') {
 function fmt(n) {
   return Number(n).toLocaleString('en-IN', {minimumFractionDigits:0, maximumFractionDigits:2});
 }
+
+// ══════════════════════════════════════════════════════════════
+// AI SHOPPING ASSISTANT — Chat Interface
+// ══════════════════════════════════════════════════════════════
+let chatOpen      = false;
+let aiTyping      = false;
+let currentProdId = null; // set when on a product detail page
+
+// ── Show chat bubble after login ──────────────────────────────
+const _origLoginSuccess = loginSuccess;
+// Patch loginSuccess to also show bubble
+const origLoginSuccessRef = window.loginSuccess;
+
+function showAIBubble()  { const el = document.getElementById('ai-chat-bubble'); if (el) el.style.display = 'block'; }
+function hideAIBubble()  { const el = document.getElementById('ai-chat-bubble'); if (el) el.style.display = 'none'; }
+
+// Hook into loginSuccess to show bubble
+const _loginSuccess = loginSuccess;
+window.addEventListener('load', () => {
+  // If user is already logged in (page refresh), bubble shows via bootstrap
+});
+
+// Called from loginSuccess — bubble appears after login
+function onAfterLogin() { showAIBubble(); }
+
+// Override loginSuccess to show bubble
+const __loginSuccess = loginSuccess;
+window.loginSuccess  = function(user, redirect = true) {
+  __loginSuccess(user, redirect);
+  showAIBubble();
+};
+
+// ── Toggle chat window ────────────────────────────────────────
+function toggleChat() {
+  chatOpen = !chatOpen;
+  const win  = document.getElementById('ai-chat-window');
+  const icon = document.querySelector('.ai-bubble-icon');
+  if (chatOpen) {
+    win.style.display = 'flex';
+    document.getElementById('ai-input')?.focus();
+    if (icon) icon.textContent = '✕';
+    scrollChatBottom();
+  } else {
+    win.style.display = 'none';
+    if (icon) icon.textContent = '🤖';
+  }
+}
+
+// ── Send suggestion chip ──────────────────────────────────────
+function sendSuggestion(btn) {
+  document.getElementById('ai-input').value = btn.textContent;
+  sendAIMessage();
+}
+
+// ── Send message ──────────────────────────────────────────────
+async function sendAIMessage() {
+  const input   = document.getElementById('ai-input');
+  const message = input?.value?.trim();
+  if (!message || aiTyping) return;
+
+  input.value = '';
+
+  // Hide suggestions after first message
+  const suggestions = document.getElementById('ai-suggestions');
+  if (suggestions) suggestions.style.display = 'none';
+
+  // Show user message
+  appendMessage(message, 'user');
+
+  // Show typing indicator
+  showTyping();
+  aiTyping = true;
+  document.getElementById('ai-send-btn').disabled = true;
+
+  try {
+    const body = { message };
+    // Pass current product_id if on detail page
+    if (currentDetailId) body.product_id = currentDetailId;
+
+    const res  = await fetch('/api/ai-chat', {
+      method:      'POST',
+      credentials: 'include',
+      headers:     { 'Content-Type': 'application/json' },
+      body:        JSON.stringify(body),
+    });
+    const data = await res.json();
+
+    hideTyping();
+
+    if (data.error && !data.reply) {
+      appendMessage('Sorry, I ran into an error. Please try again.', 'bot');
+    } else {
+      appendMessage(data.reply, 'bot', data);
+    }
+
+  } catch(e) {
+    hideTyping();
+    appendMessage('Connection error. Please check your internet and try again.', 'bot');
+  } finally {
+    aiTyping = false;
+    document.getElementById('ai-send-btn').disabled = false;
+    input?.focus();
+  }
+}
+
+// ── Append message to chat ────────────────────────────────────
+function appendMessage(text, sender, data = null) {
+  const messages = document.getElementById('ai-messages');
+  if (!messages) return;
+
+  const wrap = document.createElement('div');
+  wrap.className = `ai-msg ai-msg-${sender === 'user' ? 'user' : 'bot'}`;
+
+  const time  = new Date().toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit' });
+
+  // Convert markdown-like formatting to HTML
+  const formatted = text
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\n/g, '<br>');
+
+  wrap.innerHTML = `
+    <div class="ai-msg-bubble">${formatted}</div>
+    <div class="ai-msg-time">${time}</div>
+  `;
+
+  // Add comparison card if structured data available
+  if (data?.structured?.comparison && sender === 'bot') {
+    const compCard = buildComparisonCard(data.structured.comparison);
+    if (compCard) {
+      const bubble = wrap.querySelector('.ai-msg-bubble');
+      bubble?.insertAdjacentHTML('afterend', compCard);
+    }
+  }
+
+  messages.appendChild(wrap);
+  scrollChatBottom();
+}
+
+// ── Comparison Card ───────────────────────────────────────────
+function buildComparisonCard(comparison) {
+  if (!comparison?.length) return '';
+  const rows = comparison.map(p => `
+    <div class="ai-comparison-row">
+      <span style="color:var(--text);font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.product}</span>
+      <span style="color:var(--accent);font-family:var(--font-m);flex-shrink:0;margin-left:8px">₹${p.current_price ? Math.round(p.current_price).toLocaleString('en-IN') : 'N/A'}</span>
+      <span style="color:var(--green);font-size:10px;margin-left:8px;flex-shrink:0">↓${p.price_drop_pct}%</span>
+    </div>
+  `).join('');
+  return `<div class="ai-comparison-card">${rows}</div>`;
+}
+
+// ── Typing indicator ──────────────────────────────────────────
+function showTyping() {
+  const messages = document.getElementById('ai-messages');
+  if (!messages) return;
+  const el = document.createElement('div');
+  el.className = 'ai-msg ai-msg-bot';
+  el.id = 'ai-typing-indicator';
+  el.innerHTML = `<div class="ai-msg-bubble" style="padding:10px 14px">
+    <div class="ai-typing"><span></span><span></span><span></span></div>
+  </div>`;
+  messages.appendChild(el);
+  scrollChatBottom();
+}
+function hideTyping() {
+  document.getElementById('ai-typing-indicator')?.remove();
+}
+
+function scrollChatBottom() {
+  const messages = document.getElementById('ai-messages');
+  if (messages) setTimeout(() => { messages.scrollTop = messages.scrollHeight; }, 50);
+}
+
+// ── Clear chat ────────────────────────────────────────────────
+async function clearChat() {
+  try {
+    await fetch('/api/ai-chat/clear', { method:'DELETE', credentials:'include' });
+  } catch {}
+  const messages = document.getElementById('ai-messages');
+  if (messages) messages.innerHTML = `
+    <div class="ai-msg ai-msg-bot">
+      <div class="ai-msg-bubble">Chat cleared! How can I help you with your shopping decisions? 🛍️</div>
+    </div>`;
+  const suggestions = document.getElementById('ai-suggestions');
+  if (suggestions) suggestions.style.display = 'flex';
+}
+
+// ── Update status when AI is typing ──────────────────────────
+const _origSendAIMessage = sendAIMessage;

@@ -37,4 +37,7 @@ const API = {
 
   scrapeUrl:   (url)           => apiFetch('/scrape', { method:'POST', body:JSON.stringify({url}) }),
   predict:     (id)            => apiFetch(`/predict/${id}`),
+
+  aiChat:      (msg, pid)       => apiFetch('/ai-chat', { method:'POST', body:JSON.stringify({message:msg, product_id:pid}) }),
+  clearChat:   ()               => apiFetch('/ai-chat/clear', { method:'DELETE' }),
 };

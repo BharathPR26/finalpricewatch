@@ -468,5 +468,69 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="js/api.js"></script>
 <script src="js/app.js"></script>
+
+<!-- ═══════════════ AI SHOPPING ASSISTANT ═════════════════════ -->
+<!-- Floating chat bubble — visible on all pages after login -->
+<div id="ai-chat-bubble" style="display:none">
+  <button class="ai-bubble-btn" onclick="toggleChat()" title="AI Shopping Assistant">
+    <span class="ai-bubble-icon">🤖</span>
+    <span class="ai-bubble-badge" id="ai-bubble-badge" style="display:none"></span>
+  </button>
+</div>
+
+<div id="ai-chat-window" class="ai-chat-window" style="display:none">
+  <!-- Header -->
+  <div class="ai-chat-header">
+    <div class="ai-chat-header-left">
+      <div class="ai-chat-avatar">🤖</div>
+      <div>
+        <div class="ai-chat-name">PriceWatch AI</div>
+        <div class="ai-chat-status" id="ai-status">Shopping Assistant · Always here</div>
+      </div>
+    </div>
+    <div style="display:flex;gap:4px">
+      <button class="ai-header-btn" onclick="clearChat()" title="Clear chat">🗑</button>
+      <button class="ai-header-btn" onclick="toggleChat()" title="Close">✕</button>
+    </div>
+  </div>
+
+  <!-- Suggestion chips -->
+  <div class="ai-suggestions" id="ai-suggestions">
+    <button class="ai-chip" onclick="sendSuggestion(this)">Should I buy now?</button>
+    <button class="ai-chip" onclick="sendSuggestion(this)">My watchlist status</button>
+    <button class="ai-chip" onclick="sendSuggestion(this)">Show my products</button>
+    <button class="ai-chip" onclick="sendSuggestion(this)">Best deals today</button>
+  </div>
+
+  <!-- Messages -->
+  <div class="ai-messages" id="ai-messages">
+    <div class="ai-msg ai-msg-bot">
+      <div class="ai-msg-bubble">
+        👋 Hi! I'm your AI Shopping Assistant. I can analyze your tracked products and help you decide:<br><br>
+        • 📉 "Should I buy now or wait?"<br>
+        • ⚖️ "Compare two products"<br>
+        • 💰 "Best product under ₹20,000"<br>
+        • 📊 "Show my watchlist status"<br><br>
+        What would you like to know?
+      </div>
+    </div>
+  </div>
+
+  <!-- Input -->
+  <div class="ai-input-area">
+    <input
+      type="text"
+      id="ai-input"
+      class="ai-input"
+      placeholder="Ask me anything about your products..."
+      onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault();sendAIMessage();}"
+      autocomplete="off"
+    />
+    <button class="ai-send-btn" id="ai-send-btn" onclick="sendAIMessage()">
+      <span>➤</span>
+    </button>
+  </div>
+</div>
+
 </body>
 </html>
