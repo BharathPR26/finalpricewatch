@@ -12,14 +12,13 @@ router.get('/', requireAuth, async (req, res) => {
              p.name AS product_name, p.category,
              p.image_url, p.url, p.product_id,
              w.target_price
-      FROM alerts a
-      JOIN watchlist w ON w.watch_id   = a.watch_id
-      JOIN products  p ON p.product_id = w.product_id
-      WHERE w.user_id = ?
-      ORDER BY a.triggered_at DESC
-      LIMIT 100
+      FROM   alerts a
+      JOIN   watchlist w ON w.watch_id   = a.watch_id
+      JOIN   products  p ON p.product_id = w.product_id
+      WHERE  w.user_id = ?
+      ORDER  BY a.triggered_at DESC
+      LIMIT  100
     `, [req.session.user.user_id]);
-
     const unread_count = rows.filter(r => !r.is_read).length;
     res.json({ alerts: rows, unread_count });
   } catch (err) {
@@ -28,7 +27,7 @@ router.get('/', requireAuth, async (req, res) => {
   }
 });
 
-// PUT /api/alerts/read-all  — PostgreSQL version (no JOIN in UPDATE)
+// PUT /api/alerts/read-all  — PostgreSQL subquery (no JOIN in UPDATE)
 router.put('/read-all', requireAuth, async (req, res) => {
   try {
     await db.query(`
@@ -41,41 +40,39 @@ router.put('/read-all', requireAuth, async (req, res) => {
     res.json({ message: 'All marked read.' });
   } catch (err) {
     console.error('[PUT /alerts/read-all]', err.message);
-    res.status(500).json({ error: 'Failed.' });
+    res.status(500).json({ error: 'Failed to mark alerts as read.' });
   }
 });
 
-// GET /api/alerts/stats  — fully PostgreSQL-compatible
+// GET /api/alerts/stats  — PostgreSQL safe (no HAVING alias, no JOIN in UPDATE)
 router.get('/stats', requireAuth, async (req, res) => {
   try {
     const uid = req.session.user.user_id;
 
-    // Use Number() to convert PostgreSQL bigint strings to JS numbers
+    // Number() converts PostgreSQL COUNT bigint string to JS number
     const [rp] = await db.query(
-      `SELECT COUNT(*) AS n FROM products WHERE added_by = ?`, [uid]);
+      'SELECT COUNT(*) AS n FROM products WHERE added_by = ?', [uid]);
     const total_products = Number(rp[0]?.n || 0);
 
     const [rw] = await db.query(
-      `SELECT COUNT(*) AS n FROM watchlist WHERE user_id = ? AND is_active = TRUE`, [uid]);
+      'SELECT COUNT(*) AS n FROM watchlist WHERE user_id = ? AND is_active = TRUE', [uid]);
     const watching = Number(rw[0]?.n || 0);
 
     const [ra] = await db.query(`
-      SELECT COUNT(*) AS n
-      FROM   alerts a
+      SELECT COUNT(*) AS n FROM alerts a
       JOIN   watchlist w ON w.watch_id = a.watch_id
       WHERE  w.user_id = ?
     `, [uid]);
     const total_alerts = Number(ra[0]?.n || 0);
 
     const [ru] = await db.query(`
-      SELECT COUNT(*) AS n
-      FROM   alerts a
+      SELECT COUNT(*) AS n FROM alerts a
       JOIN   watchlist w ON w.watch_id = a.watch_id
       WHERE  w.user_id = ? AND a.is_read = FALSE
     `, [uid]);
     const unread = Number(ru[0]?.n || 0);
 
-    // Best deals — subquery approach to avoid HAVING alias issue
+    // Best deals — subquery avoids PostgreSQL HAVING alias problem
     const [best_deals] = await db.query(`
       SELECT name, category, product_id, first_price, current_price
       FROM (
@@ -87,8 +84,7 @@ router.get('/stats', requireAuth, async (req, res) => {
           (SELECT ph2.price FROM price_history ph2
            WHERE  ph2.product_id = p.product_id
            ORDER  BY ph2.recorded_at DESC LIMIT 1) AS current_price
-        FROM products p
-        WHERE p.added_by = ?
+        FROM products p WHERE p.added_by = ?
       ) sub
       WHERE first_price   IS NOT NULL
         AND current_price IS NOT NULL

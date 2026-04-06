@@ -632,13 +632,14 @@ async function markAllRead() {
 
 async function refreshAlertBadge() {
   try {
-    const { unread_count } = await API.getAlerts();
+    const { unread } = await API.getStats();
+    const count = Number(unread || 0);
     ['alert-badge','bnav-alerts-badge'].forEach(id => {
       const el = document.getElementById(id);
-      if (el) { el.style.display = unread_count > 0 ? 'inline' : 'none'; el.textContent = unread_count; }
+      if (el) { el.style.display = count > 0 ? 'inline' : 'none'; el.textContent = count; }
     });
     const dot = document.getElementById('topnav-dot');
-    if (dot) dot.style.display = unread_count > 0 ? 'block' : 'none';
+    if (dot) dot.style.display = count > 0 ? 'block' : 'none';
   } catch {}
 }
 
@@ -748,17 +749,41 @@ function openUpdatePrice(id) {
 async function submitUpdatePrice() {
   const pid   = document.getElementById('update-price-pid').value;
   const price = parseFloat(document.getElementById('update-price-val').value);
-  if (!price) return toast('Enter a valid price.', 'error');
+  if (!price || isNaN(price)) return toast('Enter a valid price.', 'error');
+
+  // Disable button while saving
+  const saveBtn = document.querySelector('#modal-update-price .btn-primary');
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving...'; }
+
   try {
     const r = await API.updatePrice(pid, price);
     closeModal('modal-update-price');
-    toast(r.alerts_triggered > 0
-      ? (r.emails_dispatched > 0 ? '🎯 Target hit! Gmail sent!' : '🎯 Alert created!')
-      : 'Price updated.', r.alerts_triggered > 0 ? 'success' : 'info');
+
+    // Show toast immediately
+    if (r.alerts_triggered > 0) {
+      toast('🎯 Target hit! Price alert created. Gmail sending in background...', 'success');
+    } else {
+      toast(`✓ Price updated to ₹${Number(price).toLocaleString('en-IN')}`, 'success');
+    }
+
+    // Refresh badge
     refreshAlertBadge();
-    if (document.getElementById('page-detail').classList.contains('active')) loadDetail(pid);
-    else loadProducts();
-  } catch(e) { toast(e.message, 'error'); }
+
+    // IMMEDIATELY reload the product detail page so new price shows
+    const onDetail    = document.getElementById('page-detail')?.classList.contains('active');
+    const onProducts  = document.getElementById('page-products')?.classList.contains('active');
+    const onDashboard = document.getElementById('page-dashboard')?.classList.contains('active');
+
+    if (onDetail)    { await loadDetail(parseInt(pid)); }
+    else if (onProducts)  { await loadProducts(); }
+    else if (onDashboard) { await loadDashboard(); }
+    else { loadProducts(); }
+
+  } catch(e) {
+    toast(e.message || 'Failed to update price.', 'error');
+  } finally {
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save & Check Alert'; }
+  }
 }
 
 // ── Watchlist Actions ─────────────────────────────────────────

@@ -2,523 +2,370 @@
  * PriceWatch AI Shopping Assistant
  * POST /api/ai-chat
  *
- * Architecture:
- *   1. User sends message
- *   2. Intent detector classifies query type
- *   3. Data fetcher pulls relevant product data from DB
- *   4. Prompt builder constructs context-rich prompt
- *   5. LLM (Claude/OpenAI) generates smart response
- *   6. Response returned with data sources used
+ * Free AI tier priority:
+ *   1. Google Gemini (GEMINI_API_KEY) — FREE, 1500 requests/day
+ *   2. Rule-based fallback             — always works, no key needed
  *
- * Works WITHOUT any API key using rule-based fallback.
- * With ANTHROPIC_API_KEY → uses Claude claude-sonnet-4-20250514
- * With OPENAI_API_KEY    → uses GPT-4o-mini
+ * How to get free Gemini key:
+ *   → aistudio.google.com → Get API Key → free forever
  */
 
 const express         = require('express');
+const fetch           = require('node-fetch');
 const db              = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const router          = express.Router();
 
-// ── In-memory chat history (per session) ─────────────────────
-// Key = session user_id, Value = array of messages
+// Per-user chat history (in memory, last 8 turns)
 const chatHistory = new Map();
-const MAX_HISTORY = 10; // keep last 10 turns
+const MAX_TURNS   = 8;
 
-// ── Intent Types ──────────────────────────────────────────────
-const INTENTS = {
-  SHOULD_BUY:    'should_buy',
-  PRICE_TREND:   'price_trend',
-  COMPARE:       'compare',
-  BEST_UNDER:    'best_under',
-  PROS_CONS:     'pros_cons',
-  MY_PRODUCTS:   'my_products',
-  MY_WATCHLIST:  'my_watchlist',
-  GENERAL:       'general',
-};
-
-// ── POST /api/ai-chat ─────────────────────────────────────────
-router.post('/', requireAuth, async (req, res) => {
-  const { message, product_id } = req.body;
-  if (!message?.trim()) return res.status(400).json({ error: 'Message is required.' });
-
-  const userId = req.session.user.user_id;
-
-  // Get or init chat history for this user
-  if (!chatHistory.has(userId)) chatHistory.set(userId, []);
-  const history = chatHistory.get(userId);
-
-  // Add user message to history
-  history.push({ role: 'user', content: message.trim() });
-
-  try {
-    // Step 1: Detect intent
-    const intent = detectIntent(message);
-
-    // Step 2: Fetch relevant data from DB
-    const data = await fetchContextData(intent, message, userId, product_id);
-
-    // Step 3: Build context prompt
-    const systemPrompt = buildSystemPrompt(data, intent);
-
-    // Step 4: Generate AI response
-    const aiReply = await generateAIResponse(systemPrompt, history, message);
-
-    // Step 5: Add assistant reply to history
-    history.push({ role: 'assistant', content: aiReply.reply });
-
-    // Trim history to last MAX_HISTORY messages
-    if (history.length > MAX_HISTORY * 2) {
-      history.splice(0, history.length - MAX_HISTORY * 2);
-    }
-
-    res.json({
-      reply:      aiReply.reply,
-      data_used:  data.sources,
-      intent,
-      structured: data.structured || null,
-    });
-
-  } catch (err) {
-    console.error('[AI Chat]', err.message);
-    res.status(500).json({ error: 'AI assistant unavailable. Try again.', reply: getFallbackReply(message) });
-  }
-});
-
-// ── DELETE /api/ai-chat/clear ─────────────────────────────────
-router.delete('/clear', requireAuth, (req, res) => {
-  chatHistory.delete(req.session.user.user_id);
-  res.json({ message: 'Chat history cleared.' });
-});
-
-// ═════════════════════════════════════════════════════════════
-// INTENT DETECTION — keyword-based classification
-// ═════════════════════════════════════════════════════════════
-function detectIntent(message) {
-  const msg = message.toLowerCase();
-  if (/should i buy|worth buying|good time to buy|buy now|buy or wait/.test(msg)) return INTENTS.SHOULD_BUY;
-  if (/compare|vs\b|versus|difference between|which is better/.test(msg))          return INTENTS.COMPARE;
-  if (/best.*under|cheap.*under|under ₹|budget.*phone|recommend.*budget/.test(msg))return INTENTS.BEST_UNDER;
-  if (/pros.*cons|advantage|disadvantage|good.*bad|positive.*negative/.test(msg))  return INTENTS.PROS_CONS;
-  if (/price trend|price drop|price history|price change/.test(msg))               return INTENTS.PRICE_TREND;
-  if (/my products?|what.*tracking|what.*added|my list/.test(msg))                 return INTENTS.MY_PRODUCTS;
-  if (/my watchlist|watching|my targets?/.test(msg))                               return INTENTS.MY_WATCHLIST;
-  return INTENTS.GENERAL;
+// ── Intent detector ───────────────────────────────────────────
+function detectIntent(msg) {
+  const m = msg.toLowerCase();
+  if (/should i buy|buy now|buy or wait|worth buying|good time/.test(m)) return 'should_buy';
+  if (/compare|vs\.?\s|versus|which is better|difference/.test(m))        return 'compare';
+  if (/best.*under|budget|cheap|under ₹|under rs/.test(m))                return 'best_under';
+  if (/pros.*cons|advantages?|disadvantages?|good.*bad/.test(m))          return 'pros_cons';
+  if (/price.*trend|price.*drop|price.*history|price.*change/.test(m))    return 'price_trend';
+  if (/my products?|what.*tracking|my list|i.*tracking/.test(m))          return 'my_products';
+  if (/watchlist|watching|my target/.test(m))                              return 'my_watchlist';
+  if (/hello|hi\b|hey\b|help|what can you/.test(m))                       return 'greeting';
+  return 'general';
 }
 
-// ═════════════════════════════════════════════════════════════
-// DATA FETCHER — pulls relevant DB data based on intent
-// ═════════════════════════════════════════════════════════════
-async function fetchContextData(intent, message, userId, productId) {
-  const data    = { sources: [], structured: null };
-  const context = {};
+// ── Budget extractor ──────────────────────────────────────────
+function extractBudget(msg) {
+  const m = msg.toLowerCase();
+  let match;
+  if ((match = m.match(/(\d+)\s*k\b/)))         return parseInt(match[1]) * 1000;
+  if ((match = m.match(/₹\s*(\d[\d,]*)/)))       return parseInt(match[1].replace(/,/g,''));
+  if ((match = m.match(/rs\.?\s*(\d[\d,]*)/i)))  return parseInt(match[1].replace(/,/g,''));
+  if ((match = m.match(/under\s+(\d[\d,]*)/)))   return parseInt(match[1].replace(/,/g,''));
+  if ((match = m.match(/(\d{4,6})/)))            return parseInt(match[1]);
+  return 25000;
+}
 
-  // Always fetch user's products as context
+// ── Fetch user context from DB ────────────────────────────────
+async function fetchContext(userId, productId, intent) {
+  const ctx = { products:[], watchlist:[], priceHistory:[], trend:null };
+  const sources = [];
+
+  // User's products with price stats
   try {
-    const [products] = await db.query(`
+    const [rows] = await db.query(`
       SELECT p.product_id, p.name, p.category, p.url,
-        (SELECT ph.price FROM price_history ph WHERE ph.product_id=p.product_id ORDER BY ph.recorded_at DESC LIMIT 1) AS current_price,
-        (SELECT ph2.price FROM price_history ph2 WHERE ph2.product_id=p.product_id ORDER BY ph2.recorded_at ASC LIMIT 1) AS first_price,
-        MIN(ph3.price) AS all_time_low,
+        (SELECT ph.price FROM price_history ph WHERE ph.product_id=p.product_id
+         ORDER BY ph.recorded_at DESC LIMIT 1)::float AS current_price,
+        (SELECT ph2.price FROM price_history ph2 WHERE ph2.product_id=p.product_id
+         ORDER BY ph2.recorded_at ASC LIMIT 1)::float AS first_price,
+        MIN(ph3.price::float) AS all_time_low,
         COUNT(ph3.ph_id) AS data_points
       FROM products p
       LEFT JOIN price_history ph3 ON ph3.product_id=p.product_id
       WHERE p.added_by=?
-      GROUP BY p.product_id, p.name, p.category, p.url
-      ORDER BY p.created_at DESC
-      LIMIT 20
+      GROUP BY p.product_id,p.name,p.category,p.url
+      ORDER BY p.created_at DESC LIMIT 15
     `, [userId]);
-    context.products = products;
-    data.sources.push('user_products');
-  } catch { context.products = []; }
+    ctx.products = rows;
+    sources.push('products');
+  } catch(e) { console.error('[AI ctx products]', e.message); }
 
-  // Specific product context
+  // Watchlist
+  try {
+    const [rows] = await db.query(`
+      SELECT w.target_price::float, w.watch_id, p.name, p.category,
+        (SELECT ph.price FROM price_history ph WHERE ph.product_id=p.product_id
+         ORDER BY ph.recorded_at DESC LIMIT 1)::float AS current_price,
+        (SELECT MIN(ph2.price) FROM price_history ph2 WHERE ph2.product_id=p.product_id)::float AS all_time_low
+      FROM watchlist w JOIN products p ON p.product_id=w.product_id
+      WHERE w.user_id=? AND w.is_active=TRUE
+    `, [userId]);
+    ctx.watchlist = rows;
+    sources.push('watchlist');
+  } catch(e) { console.error('[AI ctx watchlist]', e.message); }
+
+  // Price history for current product
   if (productId) {
     try {
-      const [history] = await db.query(
+      const [rows] = await db.query(
         `SELECT price::float AS price, recorded_at FROM price_history WHERE product_id=? ORDER BY recorded_at ASC`,
         [productId]
       );
-      context.priceHistory = history;
-      data.sources.push('price_history');
-    } catch { context.priceHistory = []; }
+      ctx.priceHistory = rows;
+      if (rows.length >= 2) ctx.trend = calcTrend(rows);
+      sources.push('price_history');
+    } catch(e) { console.error('[AI ctx history]', e.message); }
   }
 
-  // Watchlist context
-  if ([INTENTS.MY_WATCHLIST, INTENTS.SHOULD_BUY, INTENTS.GENERAL].includes(intent)) {
-    try {
-      const [watchlist] = await db.query(`
-        SELECT w.target_price, p.name, p.category,
-          (SELECT ph.price FROM price_history ph WHERE ph.product_id=p.product_id ORDER BY ph.recorded_at DESC LIMIT 1) AS current_price,
-          (SELECT MIN(ph2.price) FROM price_history ph2 WHERE ph2.product_id=p.product_id) AS all_time_low
-        FROM watchlist w JOIN products p ON p.product_id=w.product_id
-        WHERE w.user_id=? AND w.is_active=TRUE
-      `, [userId]);
-      context.watchlist = watchlist;
-      data.sources.push('watchlist');
-    } catch { context.watchlist = []; }
-  }
-
-  // Comparison: extract product names from message
-  if (intent === INTENTS.COMPARE) {
-    const compData = await buildComparisonData(message, context.products);
-    context.comparison = compData;
-    data.structured    = compData;
-    data.sources.push('comparison_engine');
-  }
-
-  // Budget search
-  if (intent === INTENTS.BEST_UNDER) {
-    const budget    = extractBudget(message);
-    const matching  = context.products.filter(p => p.current_price && p.current_price <= budget);
-    context.budget  = budget;
-    context.matching = matching;
-    data.sources.push('budget_filter');
-  }
-
-  // Price trend analysis for specific product
-  if ((intent === INTENTS.PRICE_TREND || intent === INTENTS.SHOULD_BUY) && productId) {
-    const trend = analyzePriceTrend(context.priceHistory || []);
-    context.trend = trend;
-    data.sources.push('trend_analysis');
-  }
-
-  data.context = context;
-  return data;
+  return { ctx, sources };
 }
 
-// ═════════════════════════════════════════════════════════════
-// COMPARISON ENGINE
-// ═════════════════════════════════════════════════════════════
-async function buildComparisonData(message, userProducts) {
-  // Find products mentioned in message
-  const mentioned = userProducts.filter(p => {
-    const name = p.name.toLowerCase();
-    const msg  = message.toLowerCase();
-    // Match if any word of product name (>3 chars) appears in message
-    return name.split(' ').some(word => word.length > 3 && msg.includes(word));
-  });
-
-  if (mentioned.length < 2) return null;
-
-  return {
-    comparison: mentioned.slice(0, 3).map(p => {
-      const priceChange = p.first_price && p.current_price
-        ? ((p.first_price - p.current_price) / p.first_price * 100).toFixed(1)
-        : 0;
-      return {
-        product:       p.name,
-        product_id:    p.product_id,
-        category:      p.category,
-        current_price: p.current_price,
-        all_time_low:  p.all_time_low,
-        price_drop_pct: parseFloat(priceChange),
-        data_points:   p.data_points,
-      };
-    }),
-    verdict: null, // filled by LLM
-  };
-}
-
-// ═════════════════════════════════════════════════════════════
-// TREND ANALYSIS
-// ═════════════════════════════════════════════════════════════
-function analyzePriceTrend(history) {
-  if (history.length < 2) return { trend: 'insufficient_data' };
+// ── Trend calculator ──────────────────────────────────────────
+function calcTrend(history) {
   const prices = history.map(h => parseFloat(h.price));
-  const first  = prices[0];
-  const last   = prices[prices.length - 1];
-  const min    = Math.min(...prices);
-  const max    = Math.max(...prices);
-  const change = ((last - first) / first * 100).toFixed(1);
-
-  // Simple linear regression for slope
-  const n    = prices.length;
-  const xs   = prices.map((_, i) => i);
-  const xBar = xs.reduce((a,b) => a+b,0) / n;
-  const yBar = prices.reduce((a,b) => a+b,0) / n;
-  const slope = xs.reduce((s,x,i) => s + (x-xBar)*(prices[i]-yBar), 0) /
-                xs.reduce((s,x) => s + (x-xBar)**2, 0);
-
+  const first  = prices[0], last = prices[prices.length-1];
+  const min    = Math.min(...prices), max = Math.max(...prices);
+  const pct    = ((last - first) / first * 100).toFixed(1);
+  const n      = prices.length;
+  const xBar   = (n-1)/2;
+  const yBar   = prices.reduce((a,b)=>a+b,0)/n;
+  const slope  = prices.reduce((s,p,i)=>s+(i-xBar)*(p-yBar),0) /
+                 prices.reduce((s,_,i)=>s+(i-xBar)**2,0);
   return {
-    trend:       slope < -50 ? 'falling' : slope > 50 ? 'rising' : 'stable',
-    slope:       Math.round(slope),
-    change_pct:  parseFloat(change),
-    current:     last,
-    first_price: first,
-    all_time_low: min,
-    all_time_high: max,
+    trend:     slope < -30 ? 'falling' : slope > 30 ? 'rising' : 'stable',
+    change_pct: parseFloat(pct),
+    current:   last, first, all_time_low: min, all_time_high: max,
     data_points: n,
   };
 }
 
-// ═════════════════════════════════════════════════════════════
-// BUDGET EXTRACTOR
-// ═════════════════════════════════════════════════════════════
-function extractBudget(message) {
-  const patterns = [
-    /₹\s*(\d+(?:,\d+)*(?:\.\d+)?)/,
-    /rs\.?\s*(\d+(?:,\d+)*)/i,
-    /under\s+(\d+(?:,\d+)*)/i,
-    /(\d+)k\b/i,
-    /(\d{4,6})/,
-  ];
-  for (const p of patterns) {
-    const m = message.match(p);
-    if (m) {
-      let val = parseFloat(m[1].replace(/,/g,''));
-      if (message.match(/(\d+)k\b/i)) val *= 1000;
-      return val;
-    }
-  }
-  return 20000; // default budget
-}
+// ── Build system prompt with real user data ───────────────────
+function buildPrompt(ctx, intent, userName) {
+  let prompt = `You are PriceWatch AI — an intelligent shopping assistant built into a price tracking web app.
+You help ${userName || 'the user'} make smart buying decisions using their REAL tracked product data shown below.
 
-// ═════════════════════════════════════════════════════════════
-// SYSTEM PROMPT BUILDER
-// ═════════════════════════════════════════════════════════════
-function buildSystemPrompt(data, intent) {
-  const { context } = data;
-
-  let systemPrompt = `You are PriceWatch AI — an intelligent shopping assistant built into a price tracking app.
-You help users make smart buying decisions using their real product price data.
-
-PERSONALITY:
-- Concise, friendly, and data-driven
-- Give specific numbers and dates, not vague advice
+RULES:
+- Be concise (max 3 short paragraphs)
 - Use ₹ for Indian Rupee
-- Format responses with emojis for readability
-- Maximum 3-4 short paragraphs
-
-YOUR CAPABILITIES:
-- Analyze price trends from historical data
-- Compare products the user is tracking
-- Recommend best time to buy
-- Suggest budget-friendly alternatives from user's list
+- Give specific numbers from the data, not generic advice
+- Use emojis for readability
+- Only discuss products in the user's tracked list
+- End with a clear recommendation (BUY NOW / WAIT / MONITOR)
 
 `;
 
-  // Add user's product data as context
-  if (context.products?.length) {
-    systemPrompt += `\nUSER'S TRACKED PRODUCTS (${context.products.length} total):\n`;
-    context.products.slice(0, 10).forEach(p => {
+  if (ctx.products.length) {
+    prompt += `USER'S ${ctx.products.length} TRACKED PRODUCTS:\n`;
+    ctx.products.forEach(p => {
       const drop = p.first_price && p.current_price
-        ? ((p.first_price - p.current_price) / p.first_price * 100).toFixed(1)
-        : '0';
-      systemPrompt += `- ${p.name} (${p.category}): Current ₹${p.current_price || 'N/A'} | ATL ₹${p.all_time_low || 'N/A'} | Drop ${drop}% | ${p.data_points} price records\n`;
+        ? ((p.first_price - p.current_price)/p.first_price*100).toFixed(1) : '0';
+      prompt += `• ${p.name} [${p.category}] — Current: ₹${p.current_price?.toLocaleString('en-IN')||'N/A'} | ATL: ₹${p.all_time_low?.toLocaleString('en-IN')||'N/A'} | Drop: ${drop}% | ${p.data_points} records\n`;
     });
+    prompt += '\n';
   }
 
-  // Add watchlist data
-  if (context.watchlist?.length) {
-    systemPrompt += `\nUSER'S WATCHLIST (target prices set):\n`;
-    context.watchlist.forEach(w => {
-      const diff    = w.current_price && w.target_price ? w.current_price - w.target_price : null;
-      const status  = diff != null ? (diff <= 0 ? 'TARGET HIT ✅' : `₹${Math.round(diff)} above target`) : 'unknown';
-      systemPrompt += `- ${w.name}: Target ₹${w.target_price} | Current ₹${w.current_price || 'N/A'} | ${status}\n`;
+  if (ctx.watchlist.length) {
+    prompt += `WATCHLIST (${ctx.watchlist.length} items with targets):\n`;
+    ctx.watchlist.forEach(w => {
+      const gap    = w.current_price && w.target_price ? w.current_price - w.target_price : null;
+      const status = gap != null ? (gap <= 0 ? '✅ TARGET HIT' : `₹${Math.round(gap)} above target`) : '—';
+      prompt += `• ${w.name}: Target ₹${w.target_price?.toLocaleString('en-IN')} | Current ₹${w.current_price?.toLocaleString('en-IN')||'N/A'} | ${status}\n`;
     });
+    prompt += '\n';
   }
 
-  // Add price trend for specific product
-  if (context.trend && context.trend.trend !== 'insufficient_data') {
-    const t = context.trend;
-    systemPrompt += `\nPRICE TREND ANALYSIS:
-- Trend: ${t.trend.toUpperCase()}
-- Change since tracking: ${t.change_pct}%
-- All-time low: ₹${t.all_time_low}
-- All-time high: ₹${t.all_time_high}
-- Based on ${t.data_points} price records\n`;
+  if (ctx.trend) {
+    const t = ctx.trend;
+    prompt += `CURRENT PRODUCT PRICE TREND:\n`;
+    prompt += `• Direction: ${t.trend.toUpperCase()} (slope ${t.change_pct > 0 ? '+' : ''}${t.change_pct}%)\n`;
+    prompt += `• Range: ATL ₹${t.all_time_low?.toLocaleString('en-IN')} → ATH ₹${t.all_time_high?.toLocaleString('en-IN')}\n`;
+    prompt += `• Data points: ${t.data_points}\n\n`;
   }
 
-  // Add comparison data
-  if (context.comparison?.comparison) {
-    systemPrompt += `\nPRODUCT COMPARISON DATA:\n`;
-    context.comparison.comparison.forEach(c => {
-      systemPrompt += `- ${c.product}: ₹${c.current_price} | ATL ₹${c.all_time_low} | Drop ${c.price_drop_pct}%\n`;
-    });
-    systemPrompt += `Give a clear verdict on which product to buy and why.\n`;
-  }
-
-  // Add budget context
-  if (context.budget && context.matching) {
-    systemPrompt += `\nBUDGET: ₹${context.budget}. Matching products in user's list: ${context.matching.length}\n`;
-    context.matching.forEach(m => {
-      systemPrompt += `- ${m.name}: ₹${m.current_price}\n`;
-    });
-  }
-
-  // Intent-specific instructions
-  const intentInstructions = {
-    [INTENTS.SHOULD_BUY]:   'Give a clear BUY / WAIT / MONITOR recommendation with specific reasoning based on the price trend data above.',
-    [INTENTS.COMPARE]:      'Compare the products side by side. Give a clear winner recommendation with pros/cons for each.',
-    [INTENTS.BEST_UNDER]:   'Recommend the best product under the budget from the user\'s tracked products. Explain why.',
-    [INTENTS.PROS_CONS]:    'List clear pros and cons based on the price data available. Be specific.',
-    [INTENTS.PRICE_TREND]:  'Explain the price trend clearly. Tell the user if now is a good time to buy.',
-    [INTENTS.MY_PRODUCTS]:  'Summarize the user\'s tracked products. Highlight the best deals and biggest price drops.',
-    [INTENTS.MY_WATCHLIST]: 'Summarize watchlist status. Tell which products are close to or have hit their target price.',
-    [INTENTS.GENERAL]:      'Answer helpfully using the product data available. Be specific and actionable.',
+  const intentGuide = {
+    should_buy:   'Give a clear BUY NOW / WAIT / MONITOR verdict based on trend and price position.',
+    compare:      'Compare the mentioned products side-by-side. Give a clear winner.',
+    best_under:   'Recommend the best option from user\'s products within their budget.',
+    pros_cons:    'List specific pros and cons using the price data.',
+    price_trend:  'Explain the price trend clearly. Predict near-future direction.',
+    my_products:  'Summarize all tracked products. Highlight best deals.',
+    my_watchlist: 'Report watchlist status. Identify which items are closest to targets.',
+    greeting:     'Greet the user and explain what you can help with based on their product data.',
+    general:      'Answer helpfully using available product data.',
   };
 
-  systemPrompt += `\nINSTRUCTION: ${intentInstructions[intent] || intentInstructions[INTENTS.GENERAL]}`;
-  systemPrompt += `\nIMPORTANT: Only discuss products the user is actually tracking (listed above). Don't make up product data.`;
+  prompt += `TASK: ${intentGuide[intent] || intentGuide.general}\n`;
+  return prompt;
+}
 
-  return systemPrompt;
+// ── Google Gemini API (FREE — 1500 req/day) ───────────────────
+async function callGemini(systemPrompt, history, userMessage) {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) return null;
+
+  // Build conversation history for Gemini
+  const recentHistory = history.slice(-6);
+  const contents = [];
+
+  // Gemini doesn't have system role — prepend to first user message
+  let firstUserMsg = `[CONTEXT]\n${systemPrompt}\n[END CONTEXT]\n\n${userMessage}`;
+
+  if (recentHistory.length > 1) {
+    // Add prior turns
+    recentHistory.slice(0, -1).forEach(h => {
+      contents.push({ role: h.role === 'assistant' ? 'model' : 'user', parts:[{text:h.content}] });
+    });
+    firstUserMsg = userMessage; // context already in history
+  }
+  contents.push({ role:'user', parts:[{text: recentHistory.length > 1 ? userMessage : firstUserMsg}] });
+
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${key}`,
+    {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        contents,
+        systemInstruction: recentHistory.length > 1 ? { parts:[{text:systemPrompt}] } : undefined,
+        generationConfig:  { maxOutputTokens: 600, temperature: 0.7 },
+        safetySettings: [
+          { category:'HARM_CATEGORY_HARASSMENT',        threshold:'BLOCK_NONE' },
+          { category:'HARM_CATEGORY_HATE_SPEECH',        threshold:'BLOCK_NONE' },
+          { category:'HARM_CATEGORY_SEXUALLY_EXPLICIT',  threshold:'BLOCK_NONE' },
+          { category:'HARM_CATEGORY_DANGEROUS_CONTENT',  threshold:'BLOCK_NONE' },
+        ],
+      }),
+    }
+  );
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Gemini error ${res.status}: ${err}`);
+  }
+  const data = await res.json();
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) throw new Error('Empty Gemini response');
+  return { reply:text, model:'gemini-2.0-flash-lite' };
+}
+
+// ── Rule-based fallback (zero API key) ───────────────────────
+function ruleBasedFallback(intent, ctx, message, userName) {
+  const name = userName || 'there';
+
+  if (intent === 'greeting') {
+    const count = ctx.products.length;
+    return `👋 Hi ${name}! I'm your AI Shopping Assistant.\n\nI can see you're tracking **${count} product${count!==1?'s':''}**. Here's what I can help you with:\n\n• 📉 "Should I buy [product] now?"\n• ⚖️ "Compare [product A] vs [product B]"\n• 💰 "Best product under ₹20,000"\n• 📊 "My watchlist status"\n\n🔑 For smarter AI responses, add a **free Gemini API key** — see Settings.`;
+  }
+
+  if (intent === 'should_buy' && ctx.trend) {
+    const t = ctx.trend;
+    if (t.trend === 'falling')
+      return `📉 **Wait!** Price is trending down ${Math.abs(t.change_pct)}% since tracking started. All-time low is ₹${t.all_time_low?.toLocaleString('en-IN')}.\n\n🎯 **Recommendation: WAIT** — Set your target price and you'll get a Gmail alert automatically when it hits.`;
+    if (t.trend === 'rising')
+      return `📈 **Buy Now!** Price is rising ${t.change_pct}% since tracking. Current ₹${t.current?.toLocaleString('en-IN')} may be the best you'll see for a while.\n\n🎯 **Recommendation: BUY NOW** — Price looks like it'll keep going up.`;
+    return `➡️ **Price is stable.** No strong signal either way.\n\n🎯 **Recommendation: MONITOR** — Set a target price in your watchlist. You'll get an automatic Gmail alert if it drops.`;
+  }
+
+  if (intent === 'my_watchlist') {
+    if (!ctx.watchlist.length) return `👁️ Your watchlist is empty. Open any product and click "🎯 Set Target" to add it.`;
+    const hit   = ctx.watchlist.filter(w => w.current_price <= w.target_price);
+    const close = ctx.watchlist.filter(w => w.current_price > w.target_price && (w.current_price - w.target_price)/w.target_price < 0.1);
+    let reply = `👁️ **Watchlist — ${ctx.watchlist.length} item${ctx.watchlist.length!==1?'s':''}**\n\n`;
+    if (hit.length) reply += `✅ **TARGET HIT:** ${hit.map(w=>w.name).join(', ')}\n\n`;
+    if (close.length) reply += `🔥 **Almost there:** ${close.map(w=>`${w.name} (₹${Math.round(w.current_price-w.target_price)} away)`).join(', ')}\n\n`;
+    reply += `🤖 Gmail alerts fire automatically when any target is hit!`;
+    return reply;
+  }
+
+  if (intent === 'my_products') {
+    if (!ctx.products.length) return `📭 No products tracked yet. Click **+ Add Product** to start!`;
+    const best = ctx.products.filter(p=>p.first_price&&p.current_price&&p.first_price>p.current_price)
+      .sort((a,b)=>((b.first_price-b.current_price)/b.first_price)-((a.first_price-a.current_price)/a.first_price));
+    let reply = `🛍️ **Tracking ${ctx.products.length} product${ctx.products.length!==1?'s':''}:**\n\n`;
+    ctx.products.slice(0,5).forEach(p=>{
+      const drop = p.first_price&&p.current_price ? ((p.first_price-p.current_price)/p.first_price*100).toFixed(1) : 0;
+      reply += `• **${p.name}** — ₹${p.current_price?.toLocaleString('en-IN')||'N/A'}${drop>0?` ↓${drop}%`:''}\n`;
+    });
+    if (best.length) reply += `\n🏆 **Best deal:** ${best[0].name} dropped ${((best[0].first_price-best[0].current_price)/best[0].first_price*100).toFixed(1)}%`;
+    return reply;
+  }
+
+  if (intent === 'best_under') {
+    const budget  = extractBudget(message);
+    const matches = ctx.products.filter(p => p.current_price && p.current_price <= budget)
+      .sort((a,b) => {
+        const aScore = a.first_price ? (a.first_price-a.current_price)/a.first_price : 0;
+        const bScore = b.first_price ? (b.first_price-b.current_price)/b.first_price : 0;
+        return bScore - aScore;
+      });
+    if (!matches.length) return `💰 None of your tracked products are under ₹${budget.toLocaleString('en-IN')}. Click **+ Add Product** to track more items!`;
+    let reply = `💰 **Under ₹${budget.toLocaleString('en-IN')} — ${matches.length} option${matches.length!==1?'s':''}:**\n\n`;
+    matches.slice(0,4).forEach(p=>{
+      const drop = p.first_price&&p.current_price ? ((p.first_price-p.current_price)/p.first_price*100).toFixed(1) : 0;
+      reply += `• **${p.name}** — ₹${p.current_price?.toLocaleString('en-IN')}${drop>0?` (↓${drop}% from original)`:''}\n`;
+    });
+    if (matches[0]) reply += `\n🏆 **Best pick:** ${matches[0].name}`;
+    return reply;
+  }
+
+  if (intent === 'compare') {
+    const words   = message.toLowerCase().split(/\s+/);
+    const matched = ctx.products.filter(p =>
+      words.some(w => w.length>3 && p.name.toLowerCase().includes(w)));
+    if (matched.length < 2) return `⚖️ I found **${matched.length}** matching product${matched.length===1?'':'s'} in your list. Make sure both products are tracked. Try: "Compare Sony headphones vs JBL speaker"`;
+    const [p1,p2] = matched;
+    const winner = (!p1.current_price||!p2.current_price) ? null :
+      p1.current_price < p2.current_price ? p1 : p2;
+    const d1 = p1.first_price&&p1.current_price ? ((p1.first_price-p1.current_price)/p1.first_price*100).toFixed(1) : 0;
+    const d2 = p2.first_price&&p2.current_price ? ((p2.first_price-p2.current_price)/p2.first_price*100).toFixed(1) : 0;
+    return `⚖️ **${p1.name} vs ${p2.name}**\n\n📊 **${p1.name}**: ₹${p1.current_price?.toLocaleString('en-IN')||'N/A'} | Drop: ${d1}% | ${p1.data_points} records\n📊 **${p2.name}**: ₹${p2.current_price?.toLocaleString('en-IN')||'N/A'} | Drop: ${d2}% | ${p2.data_points} records\n\n${winner ? `🏆 **${winner.name}** is currently cheaper by ₹${Math.abs(p1.current_price-p2.current_price).toLocaleString('en-IN')}.` : ''}`;
+  }
+
+  // General
+  return `🤖 I can help with your ${ctx.products.length} tracked products! Try:\n\n• "Should I buy [product] now?"\n• "Show my watchlist status"\n• "Best product under ₹20,000"\n• "Compare [A] vs [B]"\n\n💡 Add a **free Gemini API key** (aistudio.google.com) in your Render environment as GEMINI_API_KEY for smarter responses.`;
 }
 
 // ═════════════════════════════════════════════════════════════
-// AI RESPONSE GENERATOR
-// Priority: Claude → OpenAI → Rule-based fallback
+// POST /api/ai-chat
 // ═════════════════════════════════════════════════════════════
-async function generateAIResponse(systemPrompt, history, userMessage) {
-  // Try Claude (Anthropic)
-  if (process.env.ANTHROPIC_API_KEY) {
-    return await callClaude(systemPrompt, history, userMessage);
-  }
+router.post('/', requireAuth, async (req, res) => {
+  const { message, product_id } = req.body;
+  if (!message?.trim()) return res.status(400).json({ error: 'Message required.' });
 
-  // Try OpenAI
-  if (process.env.OPENAI_API_KEY) {
-    return await callOpenAI(systemPrompt, history, userMessage);
-  }
+  const userId   = req.session.user.user_id;
+  const userName = req.session.user.name;
 
-  // Rule-based fallback (no API key needed)
-  return ruleBasedResponse(systemPrompt, userMessage, history);
-}
+  // Get/init history
+  if (!chatHistory.has(userId)) chatHistory.set(userId, []);
+  const history = chatHistory.get(userId);
+  history.push({ role:'user', content:message.trim() });
 
-// ── Claude Integration ────────────────────────────────────────
-async function callClaude(systemPrompt, history, userMessage) {
-  const fetch = require('node-fetch');
+  try {
+    const intent           = detectIntent(message);
+    const { ctx, sources } = await fetchContext(userId, product_id, intent);
+    const systemPrompt     = buildPrompt(ctx, intent, userName);
 
-  // Build messages array (last 6 turns for context)
-  const recentHistory = history.slice(-6);
-  const messages = recentHistory.map(h => ({ role: h.role, content: h.content }));
+    let result;
 
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method:  'POST',
-    headers: {
-      'Content-Type':      'application/json',
-      'x-api-key':         process.env.ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model:      'claude-haiku-4-5-20251001', // fast + cheap
-      max_tokens: 600,
-      system:     systemPrompt,
-      messages,
-    }),
-  });
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Claude API error: ${err}`);
-  }
-
-  const data  = await response.json();
-  const reply = data.content?.[0]?.text || 'Unable to generate response.';
-  return { reply, model: 'claude-haiku' };
-}
-
-// ── OpenAI Integration ────────────────────────────────────────
-async function callOpenAI(systemPrompt, history, userMessage) {
-  const fetch = require('node-fetch');
-
-  const recentHistory = history.slice(-6);
-  const messages = [
-    { role: 'system', content: systemPrompt },
-    ...recentHistory.map(h => ({ role: h.role, content: h.content })),
-  ];
-
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method:  'POST',
-    headers: {
-      'Content-Type':  'application/json',
-      'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model:       'gpt-4o-mini',
-      messages,
-      max_tokens:  600,
-      temperature: 0.7,
-    }),
-  });
-
-  if (!response.ok) throw new Error('OpenAI API error');
-  const data  = await response.json();
-  const reply = data.choices?.[0]?.message?.content || 'Unable to generate response.';
-  return { reply, model: 'gpt-4o-mini' };
-}
-
-// ── Rule-Based Fallback (no API key needed) ───────────────────
-function ruleBasedResponse(systemPrompt, message, history) {
-  const msg = message.toLowerCase();
-
-  // Extract product names from systemPrompt context
-  const productLines = systemPrompt.match(/- (.+?) \(.+?\): Current ₹(\S+)/g) || [];
-  const products     = productLines.map(line => {
-    const m = line.match(/- (.+?) \((.+?)\): Current ₹(\S+)/);
-    return m ? { name: m[1], category: m[2], price: m[3] } : null;
-  }).filter(Boolean);
-
-  // Best deals detection from context
-  const drops = systemPrompt.match(/Drop (.+?)%/g) || [];
-
-  if (/should i buy|buy now|good time/.test(msg)) {
-    const trendMatch = systemPrompt.match(/Trend: (FALLING|RISING|STABLE)/);
-    const trend      = trendMatch?.[1] || 'STABLE';
-    if (trend === 'FALLING') {
-      return { reply: `📉 **Wait a bit!** The price is currently trending downward. Based on your price history, there's a good chance of a further drop in the next few days.\n\n🎯 **Recommendation:** Set a target price alert and wait. The all-time low in your data suggests more savings are possible.\n\n💡 Use the "Update Price" button to keep tracking and you'll get a Gmail alert automatically when your target is hit.`, model: 'rule-based' };
-    } else if (trend === 'RISING') {
-      return { reply: `📈 **Buy Now!** The price is trending upward. Waiting may cost you more.\n\n🎯 **Recommendation:** The current price is likely near the best you'll see soon. If it's within your budget, now is a good time.\n\n💡 Check the price chart on the product page for the full trend history.`, model: 'rule-based' };
-    } else {
-      return { reply: `➡️ **Price is stable.** No strong signal to buy immediately or wait.\n\n🎯 **Recommendation:** Monitor for a week. Set your target price in the watchlist — you'll get an automatic Gmail alert when it drops.\n\n💡 More price updates will improve prediction accuracy.`, model: 'rule-based' };
-    }
-  }
-
-  if (/compare|vs\b|versus/.test(msg)) {
-    if (products.length >= 2) {
-      const p1 = products[0];
-      const p2 = products[1];
-      const cheaper = parseFloat(p1.price) < parseFloat(p2.price) ? p1 : p2;
-      return { reply: `⚖️ **Comparison: ${p1.name} vs ${p2.name}**\n\n📊 **${p1.name}**: ₹${p1.price}\n📊 **${p2.name}**: ₹${p2.price}\n\n💰 **${cheaper.name}** is currently cheaper by ₹${Math.abs(parseFloat(p1.price) - parseFloat(p2.price)).toFixed(0)}.\n\n🎯 For a full AI comparison with trend analysis, add your **ANTHROPIC_API_KEY** or **OPENAI_API_KEY** to the server environment variables.`, model: 'rule-based' };
-    }
-    return { reply: `⚖️ To compare products, make sure both are in your tracked products list. Then ask something like "Compare Sony headphones vs JBL speaker".\n\n🔑 For advanced AI comparisons, add an API key to your server.`, model: 'rule-based' };
-  }
-
-  if (/my products|what.*tracking/.test(msg)) {
-    if (products.length > 0) {
-      const list = products.slice(0, 5).map(p => `• ${p.name} — ₹${p.price}`).join('\n');
-      return { reply: `🛍️ **You're tracking ${products.length} product(s):**\n\n${list}\n\nClick any product card to see the full price history and AI prediction.`, model: 'rule-based' };
-    }
-    return { reply: `📭 You haven't added any products yet. Click **+ Add Product** to start tracking prices!`, model: 'rule-based' };
-  }
-
-  if (/best.*under|budget|cheap/.test(msg)) {
-    if (products.length > 0) {
-      const budget  = extractBudget(message);
-      const matches = products.filter(p => parseFloat(p.price) <= budget);
-      if (matches.length > 0) {
-        return { reply: `💰 **Under ₹${budget.toLocaleString('en-IN')}:**\n\n${matches.map(p => `• ${p.name} — ₹${p.price}`).join('\n')}\n\n🎯 All of these are in your tracked list. Check their price history to find the best deal!`, model: 'rule-based' };
+    // Try Gemini first (free)
+    if (process.env.GEMINI_API_KEY) {
+      try {
+        result = await callGemini(systemPrompt, history, message);
+      } catch(e) {
+        console.warn('[AI] Gemini failed:', e.message, '— using fallback');
       }
-      return { reply: `💰 None of your currently tracked products are under ₹${budget.toLocaleString('en-IN')}. You can add new products using the **+ Add Product** button.`, model: 'rule-based' };
     }
+
+    // Rule-based fallback
+    if (!result) {
+      result = { reply: ruleBasedFallback(intent, ctx, message, userName), model:'rule-based' };
+    }
+
+    // Save assistant reply to history
+    history.push({ role:'assistant', content: result.reply });
+    if (history.length > MAX_TURNS * 2) history.splice(0, history.length - MAX_TURNS * 2);
+
+    // Build comparison data if needed
+    let structured = null;
+    if (intent === 'compare' && ctx.products.length >= 2) {
+      const words   = message.toLowerCase().split(/\s+/);
+      const matched = ctx.products.filter(p => words.some(w => w.length>3 && p.name.toLowerCase().includes(w)));
+      if (matched.length >= 2) structured = { comparison: matched.slice(0,3) };
+    }
+
+    res.json({ reply:result.reply, model:result.model, intent, data_used:sources, structured });
+
+  } catch (err) {
+    console.error('[AI Chat]', err.message);
+    res.status(500).json({ reply:'Something went wrong. Please try again.', error:err.message });
   }
+});
 
-  if (/watchlist|watching|target/.test(msg)) {
-    return { reply: `👁️ Your watchlist shows products where you've set a target price. When any product drops to your target, you get an automatic Gmail alert!\n\nGo to **Watchlist** tab to see all your watching items and their current status.`, model: 'rule-based' };
-  }
-
-  // Generic helpful response
-  const tips = [
-    `I can help you with:\n\n• "Should I buy [product] now?"\n• "Compare [product A] vs [product B]"\n• "What's the price trend for my products?"\n• "Best product under ₹20,000"\n• "Show my watchlist status"\n\n🔑 For advanced AI responses, add **ANTHROPIC_API_KEY** to your Render environment variables.`,
-    `💡 **Quick tip:** To get better predictions, update the price of your products regularly using the "✏️ Update Price" button. More data = more accurate AI predictions!`,
-    `🤖 I'm your shopping assistant! I can analyze the price data from all your tracked products.\n\nTry asking: "Which of my products has dropped the most?" or "Is now a good time to buy any of my watchlist items?"`,
-  ];
-
-  const randomTip = tips[Math.floor(Math.random() * tips.length)];
-  return { reply: randomTip, model: 'rule-based' };
-}
-
-function getFallbackReply(message) {
-  return `I encountered an issue processing your request. Please try again or rephrase your question. You can ask me things like "Should I buy now?" or "Compare my products".`;
-}
+// DELETE /api/ai-chat/clear
+router.delete('/clear', requireAuth, (req, res) => {
+  chatHistory.delete(req.session.user.user_id);
+  res.json({ message:'Cleared.' });
+});
 
 module.exports = router;

@@ -25,7 +25,7 @@ router.get('/', requireAuth, async (req, res) => {
     `, [req.session.user.user_id]);
     res.json({ products: rows });
   } catch (err) {
-    console.error(err);
+    console.error('[GET /products]', err.message);
     res.status(500).json({ error: 'Failed to fetch products.' });
   }
 });
@@ -45,10 +45,8 @@ router.get('/:id', requireAuth, async (req, res) => {
     );
     const [watchInfo] = await db.query(`
       SELECT w.*,
-        (SELECT MIN(ph.price) FROM price_history ph
-         WHERE ph.product_id = w.product_id) AS all_time_low,
-        (SELECT ph2.price FROM price_history ph2
-         WHERE ph2.product_id = w.product_id
+        (SELECT MIN(ph.price) FROM price_history ph WHERE ph.product_id = w.product_id) AS all_time_low,
+        (SELECT ph2.price FROM price_history ph2 WHERE ph2.product_id = w.product_id
          ORDER BY ph2.recorded_at DESC LIMIT 1) AS current_price
       FROM watchlist w
       WHERE w.user_id = ? AND w.product_id = ?
@@ -56,7 +54,7 @@ router.get('/:id', requireAuth, async (req, res) => {
 
     res.json({ product: prod[0], history, watchInfo: watchInfo[0] || null });
   } catch (err) {
-    console.error(err);
+    console.error('[GET /products/:id]', err.message);
     res.status(500).json({ error: 'Failed to fetch product.' });
   }
 });
@@ -74,19 +72,18 @@ router.post('/', requireAuth, async (req, res) => {
     );
     const product_id = result[0].product_id;
 
-    await db.query(
-      'INSERT INTO price_history (product_id, price) VALUES (?, ?)',
-      [product_id, initial_price]
-    );
+    await db.query('INSERT INTO price_history (product_id, price) VALUES (?, ?)',
+      [product_id, initial_price]);
 
     res.json({ message: 'Product added.', product_id });
   } catch (err) {
-    console.error(err);
+    console.error('[POST /products]', err.message);
     res.status(500).json({ error: 'Failed to add product.' });
   }
 });
 
-// POST /api/products/:id/price — update price + check alerts
+// POST /api/products/:id/price
+// FIX: Respond IMMEDIATELY, send email in background (non-blocking)
 router.post('/:id/price', requireAuth, async (req, res) => {
   try {
     const { price } = req.body;
@@ -99,15 +96,39 @@ router.post('/:id/price', requireAuth, async (req, res) => {
     );
     if (!prod.length) return res.status(404).json({ error: 'Product not found.' });
 
+    // 1. Save price to DB immediately
     await db.query(
       'INSERT INTO price_history (product_id, price) VALUES (?, ?)',
       [req.params.id, price]
     );
 
+    // 2. Check alerts (fast DB query — no email yet)
     const alertsCreated = await checkAndCreateAlerts(req.params.id, price);
 
-    let emailsSent = 0;
-    for (const alert of alertsCreated) {
+    // 3. Respond IMMEDIATELY to user — don't wait for email
+    res.json({
+      message:           'Price updated.',
+      new_price:         parseFloat(price),
+      alerts_triggered:  alertsCreated.length,
+      emails_dispatched: alertsCreated.length > 0 ? 'sending' : 0,
+    });
+
+    // 4. Send emails in BACKGROUND after response is sent
+    // This prevents the "price update hangs" issue
+    if (alertsCreated.length > 0) {
+      sendEmailsInBackground(alertsCreated, price);
+    }
+
+  } catch (err) {
+    console.error('[POST /products/:id/price]', err.message);
+    res.status(500).json({ error: 'Failed to update price.' });
+  }
+});
+
+// ── Background email sender (never blocks the response) ───────
+async function sendEmailsInBackground(alertsCreated, price) {
+  for (const alert of alertsCreated) {
+    try {
       if (!alert.notify_email) continue;
       const sent = await sendPriceAlertEmail({
         toEmail:      alert.user_email,
@@ -115,30 +136,25 @@ router.post('/:id/price', requireAuth, async (req, res) => {
         productName:  alert.product_name,
         productUrl:   alert.url,
         productImage: alert.image_url,
-        currentPrice: price,
-        targetPrice:  alert.target_price,
-        allTimeLow:   alert.all_time_low,
-        dropPct:      alert.drop_pct,
-        category:     alert.category,
+        currentPrice: parseFloat(price),
+        targetPrice:  parseFloat(alert.target_price),
+        allTimeLow:   parseFloat(alert.all_time_low || price),
+        dropPct:      alert.drop_pct || '0',
+        category:     alert.category || 'Other',
       });
       if (sent) {
         await db.query('UPDATE alerts SET email_sent = TRUE WHERE alert_id = ?', [alert.alert_id]);
-        emailsSent++;
+        console.log(`[Email] ✓ Sent to ${alert.user_email} for "${alert.product_name}"`);
+      } else {
+        console.log(`[Email] ✗ Failed for ${alert.user_email}`);
       }
+    } catch (err) {
+      console.error('[Email Background]', err.message);
     }
-
-    res.json({
-      message: 'Price updated.',
-      alerts_triggered: alertsCreated.length,
-      emails_dispatched: emailsSent,
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to update price.' });
   }
-});
+}
 
-// ── Exported: checkAndCreateAlerts (used by auto-scrape) ───────
+// ── checkAndCreateAlerts — replaces SQL trigger ───────────────
 async function checkAndCreateAlerts(productId, newPrice) {
   const created = [];
   try {
@@ -170,7 +186,7 @@ async function checkAndCreateAlerts(productId, newPrice) {
       created.push({ ...match, alert_id: result[0].alert_id, drop_pct: dropPct });
     }
   } catch (err) {
-    console.error('[Alert Check]', err.message);
+    console.error('[checkAndCreateAlerts]', err.message);
   }
   return created;
 }
