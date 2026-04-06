@@ -1017,3 +1017,109 @@ async function clearChat() {
 
 // ── Update status when AI is typing ──────────────────────────
 const _origSendAIMessage = sendAIMessage;
+
+// ══════════════════════════════════════════════════════════════
+// FORGOT / RESET PASSWORD
+// ══════════════════════════════════════════════════════════════
+
+function showForgotPassword() {
+  document.getElementById('forgot-email').value = '';
+  document.getElementById('forgot-form').style.display    = 'block';
+  document.getElementById('forgot-success').style.display = 'none';
+  openModal('modal-forgot-password');
+  setTimeout(() => document.getElementById('forgot-email')?.focus(), 200);
+}
+
+async function submitForgotPassword() {
+  const email = document.getElementById('forgot-email').value.trim();
+  if (!email) return toast('Enter your email address.', 'error');
+
+  const btn = document.getElementById('forgot-btn');
+  btn.disabled = true; btn.textContent = 'Sending...';
+
+  try {
+    const res  = await fetch('/api/auth/forgot-password', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ email }),
+    });
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error || 'Failed');
+
+    // Show success regardless (security: don't reveal if email exists)
+    document.getElementById('forgot-form').style.display    = 'none';
+    document.getElementById('forgot-success').style.display = 'block';
+
+  } catch(e) {
+    toast(e.message || 'Something went wrong. Try again.', 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Send Reset Link';
+  }
+}
+
+// ── Handle /reset-password?token=xxx URL ──────────────────────
+let resetToken = null;
+
+function checkResetPasswordUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const token  = params.get('token');
+  if (!token || !window.location.pathname.includes('reset-password')) return;
+
+  resetToken = token;
+
+  // Verify token is valid
+  fetch(`/api/auth/verify-reset-token?token=${token}`)
+    .then(r => r.json())
+    .then(data => {
+      if (data.valid) {
+        // Show reset password screen
+        document.getElementById('auth-screen').style.display = 'none';
+        document.getElementById('app').style.display         = 'none';
+        const screen = document.getElementById('reset-password-screen');
+        screen.style.display = 'flex';
+      } else {
+        showAuth('login');
+        toast('Reset link is invalid or expired. Request a new one.', 'error');
+      }
+    })
+    .catch(() => { showAuth('login'); });
+}
+
+async function submitResetPassword() {
+  const newPw  = document.getElementById('reset-new-password').value;
+  const confPw = document.getElementById('reset-confirm-password').value;
+  const errEl  = document.getElementById('reset-error');
+
+  errEl.style.display = 'none';
+
+  if (!newPw || newPw.length < 6) { errEl.style.display='block'; errEl.textContent='Password must be at least 6 characters.'; return; }
+  if (newPw !== confPw)           { errEl.style.display='block'; errEl.textContent='Passwords do not match.'; return; }
+
+  try {
+    const res  = await fetch('/api/auth/reset-password', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ token: resetToken, password: newPw }),
+    });
+    const data = await res.json();
+
+    if (!res.ok) { errEl.style.display='block'; errEl.textContent = data.error || 'Reset failed.'; return; }
+
+    document.getElementById('reset-form').style.display   = 'none';
+    document.getElementById('reset-success').style.display = 'block';
+
+  } catch(e) {
+    errEl.style.display = 'block';
+    errEl.textContent   = 'Something went wrong. Please try again.';
+  }
+}
+
+function goToLogin() {
+  document.getElementById('reset-password-screen').style.display = 'none';
+  window.history.pushState({}, '', '/login');
+  showAuth('login');
+}
+
+// Run on page load to handle /reset-password URL
+checkResetPasswordUrl();
